@@ -1,3 +1,10 @@
+> [!WARNING]
+> **THIS FORK IS UNDER DEVELOPMENT — EXPECT BUGS AND BREAKING CHANGES**
+>
+> This fork is experimental and currently intended for testing. Bugs, incomplete features, and breaking changes are expected; running it may break networking or other system functionality. Use disposable test systems or devices you can recover, and keep verified backups.
+>
+> For use beyond testing, prefer the more established [original Unleash project](https://github.com/mateussiqueira/unleash). The original has its own known bugs, including some addressed in this fork, so review its limitations before use.
+
 <p align="center">
   <img src="docs/icon.svg" width="120" alt="unleash logo">
 </p>
