@@ -29,7 +29,7 @@ jobs:
         env:
           HOMEBREW_NO_AUTO_UPDATE: 1
         run: |
-          brew install shellcheck bats-core
+          brew install shellcheck bats-core parallel
           # Prefer system Bash in Bats and subprocesses as well as workflow steps.
           echo "/bin" >> "$GITHUB_PATH"
       - name: Report tools and verify Bash compatibility environment
@@ -39,5 +39,6 @@ jobs:
           python3 --version
           shellcheck --version
           bats --version
+          parallel --version
       - name: Run lint, tests, and standalone consistency check
-        run: make ci
+        run: make ci BATS_FLAGS='--jobs 3 --no-parallelize-within-files'

@@ -4,9 +4,10 @@ GitHub Actions runs the checks in `.github/workflows/ci.yml` for pushes to
 `main`, pull requests targeting any branch, and manual workflow dispatches.
 Pull requests between stacked branches receive the same checks.
 
-The macOS 15 job uses system Bash 3.2, installs ShellCheck and Bats with
-Homebrew, and runs `make ci`. Tool versions are printed in each run; Homebrew
-provides the installed ShellCheck and Bats versions.
+The macOS 15 job uses system Bash 3.2 and installs ShellCheck, Bats, and GNU
+parallel with Homebrew. It runs `make ci` with three parallel Bats workers
+across test files; tests within each file remain sequential. Tool versions are
+printed in each run; Homebrew provides the installed development tool versions.
 
 ## Local checks
 
@@ -19,6 +20,13 @@ make ci
 
 Python 3 and Git are also required. Keep Bash 3.2 first on `PATH` when checking
 compatibility with the system shell.
+
+Local tests run serially by default. To use the same parallel mode as CI:
+
+```sh
+brew install parallel
+make ci BATS_FLAGS='--jobs 3 --no-parallelize-within-files'
+```
 
 `make ci` runs:
 
