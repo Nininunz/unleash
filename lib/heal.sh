@@ -5,12 +5,8 @@ heal_suppress() {
 
 	step "Checking current MDM suppression state..."
 	local cfg="${data_mount}/private/var/db/ConfigurationProfiles/Settings"
-	local hosts="${data_mount}/private/etc/hosts"
 	local ldp="${data_mount}/private/var/db/com.apple.xpc.launchd/disabled.plist"
 
-	if [ "$DRY_RUN" != true ] && [ -f "$hosts" ]; then
-		_restore_rosetta_hosts "$hosts" || error_exit "Could not repair old Rosetta hosts blocks."
-	fi
 
 	local needs_heal=false
 
@@ -21,15 +17,10 @@ heal_suppress() {
 		info "DEP markers clean"
 	fi
 
-	if [ -f "$hosts" ]; then
-		if grep -q "iprofiles.apple.com" "$hosts" 2>/dev/null; then
-			info "Domain block active"
-		else
-			warn "Domain block missing"
-			needs_heal=true
-		fi
+	if hosts_policy_matches "$data_mount"; then
+		info "Owned hosts entries match saved policy"
 	else
-		warn "Hosts file missing"
+		warn "Owned hosts entries need reconciliation"
 		needs_heal=true
 	fi
 

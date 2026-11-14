@@ -1,4 +1,8 @@
 do_uninstall() {
+  if [ "${DRY_RUN:-false}" = true ]; then
+    printf '[dry-run] uninstall: no changes\n'
+    return 0
+  fi
   header "Unleash — Full Uninstall"
 
   if ! is_root; then
@@ -25,6 +29,17 @@ do_uninstall() {
     end_fail; echo "     Not installed"
   fi
 
+  begin "Stopping monitor if running"
+  local pidfile="/tmp/unleash-monitor.pid"
+  if [ -f "$pidfile" ]; then
+    kill "$(cat "$pidfile")" 2>/dev/null || true
+    rm -f "$pidfile"
+    end_ok
+  else
+    end_fail; echo "     Not running"
+  fi
+
+
   begin "Cleaning pf anchors"
   local anchors=("/etc/pf.anchors/com.unleash/mdm" "/etc/pf.anchors/com.unleash.selective")
   for a in "${anchors[@]}"; do
@@ -41,19 +56,9 @@ do_uninstall() {
   pfctl -f /etc/pf.conf 2>/dev/null || true
   end_ok
 
-  begin "Cleaning hosts entries"
-  local hosts="/private/etc/hosts"
-  if [ -f "$hosts" ]; then
-    sed -i '' '/# Added by unleash/d' "$hosts" 2>/dev/null || true
-    local domains=("iprofiles.apple.com" "deviceenrollment.apple.com" "mdmenrollment.apple.com")
-    for d in "${domains[@]}"; do
-      sed -i '' "/[[:space:]]$d/d" "$hosts" 2>/dev/null || true
-      sed -i '' "/::$d/d" "$hosts" 2>/dev/null || true
-    done
-    end_ok
-  else
-    end_fail; echo "     Not found"
-  fi
+  begin "Removing owned hosts entries"
+  hosts_remove "" || return 1
+  end_ok
 
   begin "Restoring launchd overrides"
   local ldp="/private/var/db/com.apple.xpc.launchd/disabled.plist"
@@ -84,15 +89,6 @@ do_uninstall() {
     end_fail; echo "     Not found"
   fi
 
-  begin "Stopping monitor if running"
-  local pidfile="/tmp/unleash-monitor.pid"
-  if [ -f "$pidfile" ]; then
-    kill "$(cat "$pidfile")" 2>/dev/null || true
-    rm -f "$pidfile"
-    end_ok
-  else
-    end_fail; echo "     Not running"
-  fi
 
   echo ""
   success "Uninstall complete"

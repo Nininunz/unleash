@@ -26,23 +26,8 @@ check_mdm_status() {
 	fi
 	echo ""
 
-	step "Blocked domains in hosts"
-	if [ -f "$hosts" ]; then
-		local matches
-		matches=$(grep -iE 'iprofiles|enrollment|mdm|acmdm|albert|gdmf|configuration|xp\.apple|gs\.apple|tb\.apple' "$hosts" 2>/dev/null)
-		if [ -n "$matches" ]; then
-			echo "$matches" | while IFS= read -r line; do
-				echo -e "  ${GRN}$line${NC}"
-			done
-		else
-			echo -e "  ${YEL}(none)${NC}"
-		fi
-		local count; count=$(echo "$matches" | grep -c . 2>/dev/null || true)
-		count="${count:-0}"
-		echo -e "  ${CYAN}Total: $count of 13 expected domains blocked${NC}"
-	else
-		echo -e "  ${YEL}(hosts not found)${NC}"
-	fi
+	step "Owned hosts entries"
+	hosts_status "$hosts" "$data_mount/private/etc/unleash-hosts.conf" || return 1
 	echo ""
 
 	step "Enrollment daemon status"

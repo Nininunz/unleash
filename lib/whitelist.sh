@@ -67,7 +67,5 @@ restore_hosts_based_block() {
   [ -n "$data_mount" ] && root="$data_mount"
   local hosts="${root}/private/etc/hosts"
 
-  if [ -f "$hosts" ] && grep -q "Added by unleash" "$hosts" 2>/dev/null; then
-    info "unleash hosts entries intact"
-  fi
+  hosts_status "$hosts" "$root/private/etc/unleash-hosts.conf"
 }

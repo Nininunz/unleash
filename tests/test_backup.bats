@@ -3,6 +3,7 @@
 
 setup() {
   load '../lib/colors.sh'
+  load '../lib/hosts.sh'
   load '../lib/backup.sh'
   SCRIPT_DIR=$(mktemp -d)
   TEST_DIR=$(mktemp -d)

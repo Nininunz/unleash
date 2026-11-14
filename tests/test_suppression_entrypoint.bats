@@ -30,7 +30,7 @@ PY
     [ -f "$target/private/var/db/com.apple.xpc.launchd/disabled.plist" ]
     grep -q '0.0.0.0 iprofiles.apple.com' "$target/private/etc/hosts"
     if [ "$kind" = orgless ]; then
-      grep -q '0.0.0.0 mdm.example.org' "$target/private/etc/hosts"
+      ! grep -q '0.0.0.0 mdm.example.org' "$target/private/etc/hosts"
     fi
   done
 }
@@ -43,6 +43,6 @@ PY
   check_optional_record apple
 }
 
-@test "suppress preserves an organization host without an organization name" {
+@test "suppress does not silently add an organization host without explicit policy" {
   check_optional_record orgless
 }

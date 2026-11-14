@@ -2,28 +2,6 @@
 
 PB="${PB:-/usr/libexec/PlistBuddy}"
 
-_restore_rosetta_hosts() {
-	local hosts="$1" tmp_hosts
-	tmp_hosts=$(mktemp "${hosts}.XXXXXX") || return 1
-	if ! cp -p "$hosts" "$tmp_hosts" || ! awk '
-		$0=="# Added by unleash — DEP enrollment block" { owned=1; print; next }
-		owned && /^(0[.]0[.]0[.]0|::)[[:space:]]+configuration[.]apple[.]com[[:space:]]*$/ { next }
-		owned && $0 !~ /^(0[.]0[.]0[.]0|::)[[:space:]]+[[:alnum:]_.-]+[[:space:]]*$/ { owned=0 }
-		{ print }
-	' "$hosts" > "$tmp_hosts"; then
-		rm -f "$tmp_hosts"
-		return 1
-	fi
-	if cmp -s "$hosts" "$tmp_hosts"; then
-		rm -f "$tmp_hosts"
-		return 0
-	fi
-	if [ ! -e "$hosts.unleash-rosetta.bak" ]; then
-		cp -p "$hosts" "$hosts.unleash-rosetta.bak" || { rm -f "$tmp_hosts"; return 1; }
-	fi
-	mv "$tmp_hosts" "$hosts" || { rm -f "$tmp_hosts"; return 1; }
-	info "Removed old Unleash Rosetta blocks; backup: $hosts.unleash-rosetta.bak"
-}
 
 suppress_enrollment() {
 	local data_mount="$1"
@@ -31,7 +9,7 @@ suppress_enrollment() {
 	if [ "$DRY_RUN" = true ]; then
 		info "[DRY RUN] Would suppress MDM enrollment on $data_mount"
 		info "[DRY RUN]   - Clear DEP markers in ConfigurationProfiles/Settings"
-		info "[DRY RUN]   - Block 13+ Apple MDM domains in /etc/hosts"
+		info "[DRY RUN]   - Reconcile saved hosts-file policy (default: three enrollment hosts)"
 		info "[DRY RUN]   - Disable 4 enrollment daemons in launchd disabled.plist"
 		info "[DRY RUN]   - Clean MDM artifacts from /Users/*/Library"
 		return 0
@@ -56,38 +34,9 @@ suppress_enrollment() {
 		info "No DEP activation record present."
 	fi
 
-	step "Blocking enrollment domains (Data volume hosts)..."
-	[ -f "$hosts" ] || { mkdir -p "$(dirname "$hosts")"; touch "$hosts"; }
-	_restore_rosetta_hosts "$hosts" || error_exit "Could not repair old Rosetta hosts blocks."
-	grep -q "Added by unleash" "$hosts" 2>/dev/null || {
-		echo "" >>"$hosts"
-		echo "# Added by unleash — DEP enrollment block" >>"$hosts"
-	}
-
-	local domains=(
-		iprofiles.apple.com
-		deviceenrollment.apple.com
-		mdmenrollment.apple.com
-		acmdm.apple.com
-		axm-adm-mdm.apple.com
-		albert.apple.com
-		gdmf.apple.com
-		ax.init-content.apple.com
-		init-content.apple.com
-		xp.apple.com
-		gs.apple.com
-		tb.apple.com
-		vpp.itunes.apple.com
-	)
-	[ -n "$mdm_host" ] && domains+=("$mdm_host")
-
-	local d
-	for d in "${domains[@]}"; do
-		grep -qiE "[[:space:]]$d(\$|[[:space:]])" "$hosts" 2>/dev/null \
-			&& { info "$d already blocked"; continue; }
-		printf '0.0.0.0 %s\n::      %s\n' "$d" "$d" >>"$hosts"
-		success "blocked $d"
-	done
+	step "Reconciling owned hosts entries..."
+	hosts_transaction "$data_mount" "$data_mount/private/etc/unleash-hosts.conf" apply || return 1
+	if [ -n "$mdm_host" ]; then info "Discovered organization host is not added automatically; select it explicitly in hosts policy."; fi
 
 	step "Resetting DEP markers..."
 	mkdir -p "$cfg"

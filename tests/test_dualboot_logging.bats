@@ -7,6 +7,7 @@
     local definitions="$BATS_TEST_TMPDIR/$entrypoint.functions"
     local target="$BATS_TEST_TMPDIR/$entrypoint Data" log="$BATS_TEST_TMPDIR/$entrypoint.log"
     mkdir -p "$target/private/etc" "$target/private/var/db" "$target/Library/Preferences/SystemConfiguration"
+    printf 'version 2\noverride iprofiles.apple.com off\noverride axm-adm-mdm.apple.com on\n' > "$target/private/etc/unleash-hosts.conf"
     printf 'original network preferences\n' > "$target/Library/Preferences/SystemConfiguration/preferences.plist"
     printf 'original Wi-Fi networks\n' > "$target/Library/Preferences/com.apple.wifi.known-networks.plist"
     cp -R "$target/Library" "$BATS_TEST_TMPDIR/$entrypoint.before"
@@ -33,6 +34,8 @@
     [ "$status" -eq 1 ]
     [ -f "$target/private/var/db/.AppleSetupDone" ]
     grep -q '0.0.0.0 deviceenrollment.apple.com' "$target/private/etc/hosts"
+    ! grep -Fxq '0.0.0.0 iprofiles.apple.com' "$target/private/etc/hosts"
+    grep -Fxq ':: axm-adm-mdm.apple.com' "$target/private/etc/hosts"
     diff -r "$BATS_TEST_TMPDIR/$entrypoint.before" "$target/Library"
   done
 }

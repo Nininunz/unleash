@@ -76,15 +76,8 @@ generate_report() {
   done
   echo ""
 
-  step "Hosts Block"
-  if grep -q "iprofiles.apple.com" /private/etc/hosts 2>/dev/null; then
-    local blocked
-    blocked=$(grep -c "0.0.0.0" /private/etc/hosts 2>/dev/null || true)
-    blocked="${blocked:-0}"
-    echo "  $blocked domain(s) blocked in /etc/hosts"
-  else
-    echo "  No block entries found"
-  fi
+  step "Owned hosts entries"
+  hosts_status /private/etc/hosts /private/etc/unleash-hosts.conf || return 1
   echo ""
 
   step "Running MDM Processes"
@@ -149,10 +142,9 @@ generate_report_json() {
   report="${report}    \"selective_block_active\": $selective_active\n"
   report="${report}  },\n"
 
-  local hosts_blocked=0
-  hosts_blocked=$(grep -c "0.0.0.0" /private/etc/hosts 2>/dev/null || true)
-  hosts_blocked="${hosts_blocked:-0}"
-  report="${report}  \"hosts_blocked\": $hosts_blocked\n"
+  local hosts_owned_domains
+  hosts_owned_domains=$(hosts_owned_count /private/etc/hosts) || return 1
+  report="${report}  \"hosts_owned_domains\": $hosts_owned_domains\n"
 
   report="${report}}"
 

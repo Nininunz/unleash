@@ -2,6 +2,7 @@
 
 setup() {
   load '../lib/colors.sh'
+  load '../lib/hosts.sh'
   load '../lib/launchd.sh'
   load '../lib/monitor.sh'
   TEST_DIR=$(mktemp -d)

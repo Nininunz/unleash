@@ -110,12 +110,7 @@ check_upgrade_safety() {
     issues=$((issues + 1))
   fi
 
-  if grep -q "iprofiles.apple.com" /private/etc/hosts 2>/dev/null; then
-    echo -e "  ${GRN}Hosts block active${NC}"
-  else
-    echo -e "  ${YEL}Hosts block not found${NC}"
-    issues=$((issues + 1))
-  fi
+  hosts_status /private/etc/hosts /private/etc/unleash-hosts.conf || return 1
 
   echo ""
   if [ "$issues" -eq 0 ]; then

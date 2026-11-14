@@ -2,6 +2,7 @@
 
 setup() {
   load '../lib/colors.sh'
+  load '../lib/hosts.sh'
   load '../lib/status.sh'
   TEST_DIR=$(mktemp -d)
   mkdir -p "$TEST_DIR/private/etc"
@@ -59,7 +60,10 @@ teardown() {
     else function_name=generate_report_json; field=installed_profiles; fi
     run "${UNLEASH_TEST_SHELL:-bash}" -u -c '
       source "$1/lib/colors.sh"
+      source "$1/lib/hosts.sh"
       source "$1/lib/$2.sh"
+      # The zero-count fixture must not depend on the actual hosts entries on this Mac.
+      hosts_owned_count() { printf "0\n"; }
       grep() {
         if [ "${1:-}" = -c ] && [ "${3:-}" = /private/etc/hosts ]; then echo 0; return 1; fi
         command grep "$@"
@@ -67,6 +71,6 @@ teardown() {
       "$3"
     ' bash "$BATS_TEST_DIRNAME/.." "$module" "$function_name"
     [ "$status" -eq 0 ]
-    echo "$output" | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data[sys.argv[1]] == 0; assert data.get("hosts_blocked",0) == 0' "$field"
+    echo "$output" | python3 -c 'import json,sys; data=json.load(sys.stdin); assert data[sys.argv[1]] == 0; assert data.get("hosts_owned_domains",0) == 0' "$field"
   done
 }

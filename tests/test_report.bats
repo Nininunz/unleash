@@ -2,6 +2,7 @@
 
 setup() {
   load '../lib/colors.sh'
+  load '../lib/hosts.sh'
   load '../lib/report.sh'
 }
 

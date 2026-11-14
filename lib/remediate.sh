@@ -51,14 +51,9 @@ cmd_remediate() {
   local extra_domains=""
   extra_domains=$(known_orgs | grep "^$org:" | cut -d: -f3 || true)
 
-  local hosts_file="/etc/hosts"
-  if [ -n "$extra_domains" ] && [ -f "$hosts_file" ]; then
-    for domain in $(echo "$extra_domains" | tr ',' ' '); do
-      if ! grep -q "$domain" "$hosts_file" 2>/dev/null; then
-        echo "0.0.0.0 $domain" >> "$hosts_file"
-        info "Blocked: $domain"
-      fi
-    done
+  if [ -n "$extra_domains" ]; then
+    info "Organization hints are not added to hosts automatically: $extra_domains"
+    info "Use 'unleash hosts edit' to select exact hosts explicitly."
   fi
 
   info "Running harden..."

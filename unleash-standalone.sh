@@ -477,32 +477,588 @@ add_to_filevault() {
 	fi
 }
 
+# Hosts-file policy only. No PF, VPN, resolver-cache, or network operations.
+# Compare checked hexadecimal byte streams. Bash read cannot distinguish EOF
+# from an I/O error; od reports read failures and preserves NULs and final LF.
+# Missing utilities and partial reads fail closed with status 2.
+hosts_files_equal() {
+  (
+    LC_ALL=C; export LC_ALL
+    [ -f "$1" ] && [ -r "$1" ] && [ -f "$2" ] && [ -r "$2" ] || exit 2
+    left=$(od -An -v -tx1 "$1") || exit 2
+    right=$(od -An -v -tx1 "$2") || exit 2
+    [ "$left" = "$right" ]
+  )
+}
+
+# Append a sentinel only after a successful read. Holding the final record
+# distinguishes a missing final newline; pipefail also catches partial cat reads.
+hosts_preview_lines() {
+  (
+    set -o pipefail
+    { cat "$2" || exit 2; printf '\001'; } |
+      LC_ALL=C awk -v prefix="$1" '
+        NR>1 {print prefix previous}
+        {previous=$0}
+        END {
+          if(substr(previous,length(previous),1)!=sprintf("%c",1)) exit 2
+          last=substr(previous,1,length(previous)-1)
+          if(length(last)) {
+            print prefix last
+            print "\\ No newline at end of file"
+          }
+        }
+      '
+  )
+}
+
+# Recovery may lack diff. Display a complete replacement hunk in that case.
+hosts_preview_diff() {
+  if command -v diff >/dev/null 2>&1; then
+    diff -u -L current-hosts -L proposed-hosts "$1" "$2"
+    return $?
+  fi
+  local result=0 old_count new_count old_start=1 new_start=1 prefix file
+  hosts_files_equal "$1" "$2" || result=$?
+  [ "$result" -ne 0 ] || return 0
+  [ "$result" -eq 1 ] || return 2
+  old_count=$(awk 'END {print NR+0}' "$1") || return 2
+  new_count=$(awk 'END {print NR+0}' "$2") || return 2
+  [ "$old_count" -ne 0 ] || old_start=0
+  [ "$new_count" -ne 0 ] || new_start=0
+  printf '%s\n' '--- current-hosts' '+++ proposed-hosts'
+  printf '@@ -%s,%s +%s,%s @@\n' "$old_start" "$old_count" "$new_start" "$new_count"
+  for prefix in - +; do
+    if [ "$prefix" = - ]; then file="$1"; else file="$2"; fi
+    hosts_preview_lines "$prefix" "$file" || return 2
+  done
+  return 1
+}
+
+hosts_same_file() {
+  [ ! -L "$2" ] && hosts_files_equal "$1" "$2" && [ "$(stat -f '%u:%g:%Lp' "$1")" = "$(stat -f '%u:%g:%Lp' "$2")" ]
+}
+
+hosts_resolve() {
+  local policy="${1:-/dev/null}" format="${2:-rows}"
+  [ -e "$policy" ] || policy=/dev/null
+  awk -v format="$format" '
+    function add(h) { if (!(h in known)) { known[h]=1; order[++count]=h } }
+    function host(s, n,a,i) {
+      s=tolower(s); sub(/[.]$/, "", s)
+      if (length(s)>253 || s !~ /^[a-z0-9.-]+$/ || s ~ /^[0-9.]+$/) return ""
+      n=split(s,a,"."); if(n<2) return ""
+      for(i=1;i<=n;i++) if(length(a[i])<1 || length(a[i])>63 || a[i] !~ /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/) return ""
+      return s
+    }
+    function fail() { print "Invalid hosts policy at line " NR > "/dev/stderr"; bad=1 }
+    BEGIN {
+      add("iprofiles.apple.com"); add("deviceenrollment.apple.com"); add("mdmenrollment.apple.com")
+      for(i=1;i<=count;i++) core[order[i]]=1
+      split("acmdm.apple.com axm-adm-mdm.apple.com albert.apple.com ax.init-content.apple.com init-content.apple.com xp.apple.com tb.apple.com vpp.itunes.apple.com", extras, " ")
+      for(i=1;i<=8;i++) add(extras[i])
+    }
+    /^[[:space:]]*(#|$)/ { next }
+    $1=="version" && NF==2 && $2=="2" { if(seenversion++) fail(); next }
+    $1=="optional" && NF==2 {
+      h=host($2); if(h=="" || core[h]) {fail(); next}; add(h); optional[h]=1; next
+    }
+    $1=="override" && NF==3 && $3 ~ /^(on|off)$/ {
+      h=host($2); if(h=="" || (h in override)) {fail(); next}; add(h); override[h]=$3; next
+    }
+    { fail() }
+    END {
+      if(bad) { print "Use version 2 with optional HOST and override HOST on/off; legacy presets require explicit conversion." > "/dev/stderr"; exit 1 }
+      if(format=="config") print "version 2"
+      for(i=1;i<=count;i++) {
+        h=order[i]; state=(h in override)?override[h]:"default"
+        if((core[h] && state=="on") || (!core[h] && state=="off")) state="default"
+        present=(state=="on" || (state=="default" && core[h]))
+        if(format=="config") {
+          if(!core[h] && (optional[h] || i>11)) print "optional " h
+          if(state!="default") print "override " h " " state
+        } else print h "\t" state "\t" (present?"present":"absent") "\t" (core[h]?"core":"optional")
+      }
+    }
+  ' "$policy"
+}
+
+hosts_strip_owned() {
+  local file="$1" mode="${2:-base}"
+  awk -v mode="$mode" '
+    function mapping() { return NF==2 && ($1=="0.0.0.0" || $1=="::") && $2 ~ /^[a-zA-Z0-9.-]+$/ }
+    function owned() { if(mode=="owned") print tolower($2) "\t" $1 }
+    BEGIN {
+      split("iprofiles.apple.com deviceenrollment.apple.com mdmenrollment.apple.com acmdm.apple.com axm-adm-mdm.apple.com albert.apple.com gdmf.apple.com ax.init-content.apple.com init-content.apple.com xp.apple.com gs.apple.com tb.apple.com vpp.itunes.apple.com configuration.apple.com",list," ")
+      for(i in list) legacyhost[list[i]]=1
+    }
+    $0=="# BEGIN Unleash hosts" { if(inside || seen++) bad=1; inside=1; legacy=0; next }
+    $0=="# END Unleash hosts" { if(!inside) bad=1; inside=0; next }
+    inside { if(!mapping()) bad=1; else owned(); next }
+    $0=="# Added by unleash — DEP enrollment block" { legacy=1; next }
+    legacy && mapping() && (tolower($2) in legacyhost) { owned(); next }
+    { legacy=0; if(mode=="base") print }
+    END { if(inside || bad) { print "Malformed owned hosts section or non-mapping content; preserving file" > "/dev/stderr"; exit 1 } }
+  ' "$file"
+}
+
+hosts_candidate() {
+  local original="$1" policy="$2" output="$3" rows="$4"
+  hosts_resolve "$policy" > "$rows" || return 1
+  hosts_strip_owned "$original" > "$output" || return 1
+  if awk -F '\t' '$3=="present" { found=1 } END { exit !found }' "$rows"; then
+    {
+      printf '# BEGIN Unleash hosts\n'
+      awk -F '\t' '$3=="present" { printf "0.0.0.0 %s\n:: %s\n",$1,$1 }' "$rows"
+      printf '# END Unleash hosts\n'
+    } >> "$output" || return 1
+  fi
+}
+
+hosts_preview() {
+  (
+    hosts_preview_tmp=$(mktemp -d) || exit 1
+    trap 'rm -rf "$hosts_preview_tmp"' EXIT
+    : > "$hosts_preview_tmp/empty"
+    hosts_preview_original="$1"
+    [ -f "$hosts_preview_original" ] || hosts_preview_original="$hosts_preview_tmp/empty"
+    if [ "${3:-apply}" = remove ]; then
+      hosts_strip_owned "$hosts_preview_original" > "$hosts_preview_tmp/candidate" || exit 1
+      printf 'Would remove owned entries and clear active policy; retain a private recovery snapshot.\n'
+    else
+      hosts_resolve "$2" config > "$hosts_preview_tmp/policy" || exit 1
+      hosts_candidate "$hosts_preview_original" "$hosts_preview_tmp/policy" "$hosts_preview_tmp/candidate" "$hosts_preview_tmp/rows" || exit 1
+    fi
+    printf 'Hosts entries only; PF/VPN unchanged. Off removes owned mappings only; it is not a network allow rule.\n'
+    hosts_preview_rc=0
+    hosts_preview_diff "$hosts_preview_original" "$hosts_preview_tmp/candidate" || hosts_preview_rc=$?
+    [ "$hosts_preview_rc" -le 1 ]
+  )
+}
+
+hosts_transaction_finish() {
+  local result="$1" i failed=false
+  trap - EXIT HUP INT TERM
+  if [ "$result" -ne 0 ]; then
+    for ((i=1;i>=0;i--)); do
+      [ "${hosts_tx_started[$i]}" = true ] || continue
+      # Intent is recorded before mutation. If interrupted before the rename or
+      # deletion took effect, the original already matches and needs no restore.
+      if { [ "${hosts_tx_existed[$i]}" = true ] && [ -f "$hosts_tx_dir/before.$i" ] && hosts_same_file "$hosts_tx_dir/before.$i" "${hosts_tx_paths[$i]}"; } \
+        || { [ "${hosts_tx_existed[$i]}" = false ] && [ ! -e "${hosts_tx_paths[$i]}" ] && [ ! -L "${hosts_tx_paths[$i]}" ]; }; then
+        continue
+      fi
+      if { [ -f "$hosts_tx_dir/after.$i" ] && [ ! -L "${hosts_tx_paths[$i]}" ] && hosts_same_file "$hosts_tx_dir/after.$i" "${hosts_tx_paths[$i]}"; } \
+        || { [ ! -e "$hosts_tx_dir/after.$i" ] && [ ! -e "${hosts_tx_paths[$i]}" ] && [ ! -L "${hosts_tx_paths[$i]}" ]; }; then
+        if [ "${hosts_tx_existed[$i]}" = true ]; then
+          if [ ! -f "$hosts_tx_dir/before.$i" ] || ! cp -p "$hosts_tx_dir/before.$i" "$hosts_tx_dir/restore.$i" || ! mv -f "$hosts_tx_dir/restore.$i" "${hosts_tx_paths[$i]}"; then failed=true; fi
+        elif ! rm -f "${hosts_tx_paths[$i]}"; then failed=true
+        fi
+      else
+        printf 'Concurrent edit preserved: %s\n' "${hosts_tx_paths[$i]}" >&2
+        failed=true
+      fi
+    done
+    if [ "$failed" = false ]; then rm -rf "$hosts_tx_dir"; else printf 'Incomplete hosts rollback; inspect journal: %s\n' "$hosts_tx_dir" >&2; fi
+  else
+    if [ "$hosts_tx_action" = remove ]; then
+      printf 'Owned hosts entries and active policy removed. Rollback snapshot: %s\n' "$hosts_tx_dir"
+    else
+      printf 'Hosts policy saved/applied. Rollback snapshot: %s\n' "$hosts_tx_dir"
+    fi
+  fi
+  rmdir "$hosts_tx_lock" 2>/dev/null || true
+  exit "$result"
+}
+
+hosts_transaction() {
+  (
+    # Subshell variables survive until the Bash 3.2 EXIT trap (function locals do not).
+    hosts_tx_root="${1%/}" hosts_tx_source="$2" hosts_tx_action="${3:-apply}"
+    hosts_tx_parent="$hosts_tx_root/private/etc"
+    hosts_tx_paths=("$hosts_tx_parent/hosts" "$hosts_tx_parent/unleash-hosts.conf")
+    if [ "${DRY_RUN:-false}" = true ]; then hosts_preview "${hosts_tx_paths[0]}" "$hosts_tx_source" "$hosts_tx_action"; exit $?; fi
+    case "$hosts_tx_action" in apply|save|rollback|remove) ;; *) exit 1 ;; esac
+    # Validate before creating directories, locks or backups.
+    if [ "$hosts_tx_action" = rollback ]; then
+      [ -f "$hosts_tx_source/complete" ] && [ -f "$hosts_tx_source/manifest" ] || exit 1
+      [ "$(sed -n '1p' "$hosts_tx_source/manifest")" = 'Unleash hosts snapshot v1' ] && [ "$(sed -n '2p' "$hosts_tx_source/manifest")" = "$hosts_tx_parent" ] || { printf 'Snapshot does not belong to this target\n' >&2; exit 1; }
+    fi
+    if [ "$hosts_tx_action" != rollback ] && [ "$hosts_tx_action" != remove ]; then hosts_resolve "$hosts_tx_source" config > /dev/null || exit 1; fi
+    for hosts_tx_path in "$hosts_tx_parent" "${hosts_tx_paths[@]}"; do
+      hosts_tx_check="$hosts_tx_path"
+      while [ "$hosts_tx_check" != / ] && [ "$hosts_tx_check" != . ]; do
+        case "$hosts_tx_check" in /var|/tmp) if [ "$(readlink "$hosts_tx_check" 2>/dev/null)" = "private$hosts_tx_check" ]; then break; fi ;; esac
+        [ ! -L "$hosts_tx_check" ] || { printf 'Refusing symlink target: %s\n' "$hosts_tx_check" >&2; exit 1; }
+        hosts_tx_check=$(dirname "$hosts_tx_check")
+      done
+      [ ! -e "$hosts_tx_path" ] || [ -f "$hosts_tx_path" ] || [ "$hosts_tx_path" = "$hosts_tx_parent" ] || exit 1
+    done
+    mkdir -p "$hosts_tx_parent" || exit 1
+    hosts_tx_lock="$hosts_tx_parent/.unleash-hosts-lock"
+    (umask 077; mkdir "$hosts_tx_lock") 2>/dev/null || { printf 'Hosts policy transaction busy\n' >&2; exit 1; }
+    hosts_tx_dir=$(mktemp -d "$hosts_tx_parent/.unleash-hosts-backup.XXXXXX") || { rmdir "$hosts_tx_lock"; exit 1; }
+    hosts_tx_started=(false false) hosts_tx_existed=(false false)
+    trap 'hosts_transaction_finish $?' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    for hosts_tx_i in 0 1; do
+      if [ -f "${hosts_tx_paths[$hosts_tx_i]}" ]; then
+        hosts_tx_existed[hosts_tx_i]=true
+        cp -p "${hosts_tx_paths[$hosts_tx_i]}" "$hosts_tx_dir/before.$hosts_tx_i" || exit 1
+        : > "$hosts_tx_dir/present.$hosts_tx_i"
+      else
+        : > "$hosts_tx_dir/absent.$hosts_tx_i"
+      fi
+    done
+    if [ "$hosts_tx_action" = rollback ]; then
+      # Explicit snapshot, never a guessed latest backup or a sourced shell file.
+      for hosts_tx_i in 0 1; do
+        if [ -f "$hosts_tx_source/present.$hosts_tx_i" ]; then
+          [ ! -e "$hosts_tx_source/absent.$hosts_tx_i" ] && [ -f "$hosts_tx_source/before.$hosts_tx_i" ] || exit 1
+        else
+          [ -f "$hosts_tx_source/absent.$hosts_tx_i" ] && [ ! -e "$hosts_tx_source/before.$hosts_tx_i" ] || exit 1
+        fi
+        if [ -f "$hosts_tx_source/after.$hosts_tx_i" ]; then
+          hosts_same_file "$hosts_tx_source/after.$hosts_tx_i" "${hosts_tx_paths[$hosts_tx_i]}" || { printf 'Changed since snapshot; refusing stale rollback\n' >&2; exit 1; }
+        else
+          [ ! -e "${hosts_tx_paths[$hosts_tx_i]}" ] || exit 1
+        fi
+        if [ -f "$hosts_tx_source/present.$hosts_tx_i" ]; then
+          cp -p "$hosts_tx_source/before.$hosts_tx_i" "$hosts_tx_dir/after.$hosts_tx_i" || exit 1
+        fi
+      done
+    elif [ "$hosts_tx_action" = remove ]; then
+      # Cleanup is not a policy preference. Retain both originals in the private
+      # snapshot, publish only unrelated hosts content, and delete active policy.
+      if [ -f "$hosts_tx_dir/before.0" ]; then
+        cp -p "$hosts_tx_dir/before.0" "$hosts_tx_dir/after.0" || exit 1
+        hosts_strip_owned "$hosts_tx_dir/before.0" > "$hosts_tx_dir/after.0" || exit 1
+      fi
+      # No after.1: transactionally remove policy instead of persisting Off overrides.
+    else
+      if [ -f "$hosts_tx_dir/before.1" ]; then cp -p "$hosts_tx_dir/before.1" "$hosts_tx_dir/after.1" || exit 1; fi
+      hosts_resolve "$hosts_tx_source" config > "$hosts_tx_dir/after.1" || exit 1
+      chmod 644 "$hosts_tx_dir/after.1" || exit 1
+      : > "$hosts_tx_dir/empty"
+      hosts_tx_original="$hosts_tx_dir/empty"
+      [ ! -f "$hosts_tx_dir/before.0" ] || hosts_tx_original="$hosts_tx_dir/before.0"
+      if [ "$hosts_tx_action" = save ]; then
+        if [ -f "$hosts_tx_dir/before.0" ]; then cp -p "$hosts_tx_dir/before.0" "$hosts_tx_dir/after.0" || exit 1; fi
+      else
+        if [ -f "$hosts_tx_dir/before.0" ]; then cp -p "$hosts_tx_dir/before.0" "$hosts_tx_dir/after.0" || exit 1; fi
+        hosts_candidate "$hosts_tx_original" "$hosts_tx_dir/after.1" "$hosts_tx_dir/after.0" "$hosts_tx_dir/rows" || exit 1
+        if [ ! -f "$hosts_tx_dir/before.0" ]; then chmod 644 "$hosts_tx_dir/after.0" || exit 1; fi
+      fi
+    fi
+    printf 'Unleash hosts snapshot v1\n%s\n' "$hosts_tx_parent" > "$hosts_tx_dir/manifest" || exit 1
+    for hosts_tx_i in 0 1; do
+      if [ "${hosts_tx_existed[$hosts_tx_i]}" = true ]; then
+        hosts_same_file "$hosts_tx_dir/before.$hosts_tx_i" "${hosts_tx_paths[$hosts_tx_i]}" || exit 1
+      else
+        [ ! -e "${hosts_tx_paths[$hosts_tx_i]}" ] && [ ! -L "${hosts_tx_paths[$hosts_tx_i]}" ] || exit 1
+      fi
+      if [ -f "$hosts_tx_dir/after.$hosts_tx_i" ] && [ -f "$hosts_tx_dir/before.$hosts_tx_i" ] && hosts_same_file "$hosts_tx_dir/after.$hosts_tx_i" "$hosts_tx_dir/before.$hosts_tx_i"; then continue; fi
+      if [ -f "$hosts_tx_dir/after.$hosts_tx_i" ]; then
+        cp -p "$hosts_tx_dir/after.$hosts_tx_i" "$hosts_tx_dir/publish.$hosts_tx_i" || exit 1
+        # Register intent first: traps can run after mv succeeds but before the
+        # next shell statement. Recovery checks the actual file state above.
+        hosts_tx_started[hosts_tx_i]=true
+        mv -f "$hosts_tx_dir/publish.$hosts_tx_i" "${hosts_tx_paths[$hosts_tx_i]}" || exit 1
+      else
+        hosts_tx_started[hosts_tx_i]=true
+        rm -f "${hosts_tx_paths[$hosts_tx_i]}" || exit 1
+      fi
+    done
+    : > "$hosts_tx_dir/complete" || exit 1
+    exit 0
+  )
+}
+
+hosts_owned_count() {
+  if [ ! -f "$1" ]; then printf '0\n'; return 0; fi
+  local entries
+  entries=$(hosts_strip_owned "$1" owned) || return 1
+  printf '%s\n' "$entries" | awk -F '\t' 'NF==2 && !seen[$1]++ {n++} END { print n+0 }'
+}
+
+hosts_status() {
+  local file="$1" policy="$2" desired observed rows
+  rows=$(hosts_resolve "$policy") || return 1
+  desired=$(printf '%s\n' "$rows" | awk -F '\t' '$3=="present" {n++} END { print n+0 }') || return 1
+  observed=$(hosts_owned_count "$file") || return 1
+  printf 'Hosts policy: %s desired domains; %s observed owned domains (not a reachability test).\n' "$desired" "$observed"
+}
+
+hosts_policy_matches() {
+  (
+    hosts_match_tmp=$(mktemp -d) || exit 1
+    trap 'rm -rf "$hosts_match_tmp"' EXIT
+    [ -f "$1/private/etc/hosts" ] || exit 1
+    hosts_candidate "$1/private/etc/hosts" "$1/private/etc/unleash-hosts.conf" "$hosts_match_tmp/candidate" "$hosts_match_tmp/rows" || exit 1
+    hosts_files_equal "$1/private/etc/hosts" "$hosts_match_tmp/candidate"
+  )
+}
+
+hosts_remove() {
+  hosts_transaction "${1:-}" /dev/null remove
+}
+
+hosts_restore_owned_backup() {
+  (
+    hosts_restore_tmp=$(mktemp -d) || exit 1
+    trap 'rm -rf "$hosts_restore_tmp"' EXIT
+    hosts_strip_owned "$2" owned > "$hosts_restore_tmp/owned" || exit 1
+    if [ ! -s "$hosts_restore_tmp/owned" ]; then
+      printf 'No identifiable owned entries in raw backup; explicit migration or a complete hosts snapshot is required.\n' >&2
+      exit 1
+    fi
+    hosts_restore_current=$(hosts_resolve "$1/private/etc/unleash-hosts.conf" config) || exit 1
+    printf 'version 2\n' > "$hosts_restore_tmp/policy"
+    # Raw mappings do not encode approval to disable a core host. Keep current
+    # explicit core overrides; exact historical choices require snapshot rollback.
+    printf '%s\n' "$hosts_restore_current" | awk '$1=="optional" || ($1=="override" && ($2=="iprofiles.apple.com" || $2=="deviceenrollment.apple.com" || $2=="mdmenrollment.apple.com"))' >> "$hosts_restore_tmp/policy" || exit 1
+    hosts_resolve /dev/null > "$hosts_restore_tmp/defaults" || exit 1
+    awk -F '\t' 'FILENAME==ARGV[1] {if(NF==2) owned[$1]=1; next}
+      {seen[$1]=1; if($4!="core" && owned[$1]) print "override " $1 " on"}
+      END {for(h in owned) if(!seen[h]) {print "optional " h; print "override " h " on"}}' "$hosts_restore_tmp/owned" "$hosts_restore_tmp/defaults" >> "$hosts_restore_tmp/policy" || exit 1
+    # Restore recognized owned mappings only. Never copy unrelated stale mappings.
+    hosts_transaction "$1" "$hosts_restore_tmp/policy" apply
+  )
+}
+
+# CLI and dependency-free terminal editor for hosts policy.
+cmd_hosts() {
+  local action="${1:-preview}" root="" policy="" backup="" plain=false
+  [ "$#" -eq 0 ] || shift
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --root|--policy|--backup)
+        [ "$#" -ge 2 ] && [ -n "$2" ] || { printf 'Missing value for %s\n' "$1" >&2; return 1; }
+        case "$1" in --root) root="$2" ;; --policy) policy="$2" ;; --backup) backup="$2" ;; esac
+        shift 2 ;;
+      --plain) plain=true; shift ;;
+      *) printf 'Unknown hosts option: %s\n' "$1" >&2; return 1 ;;
+    esac
+  done
+  if [ -n "$root" ]; then
+    case "$root" in /*) ;; *) printf 'Target root must be absolute\n' >&2; return 1 ;; esac
+    root=$(cd "$root" && pwd -P) || return 1
+    [ "$root" != / ] || root=""
+  fi
+  local hosts="$root/private/etc/hosts" saved="$root/private/etc/unleash-hosts.conf"
+  if [ -n "$policy" ]; then
+    [ -f "$policy" ] || { printf 'Policy file not found\n' >&2; return 1; }
+  else policy="$saved"
+  fi
+  case "$action" in
+    preview) hosts_preview "$hosts" "$policy" ;;
+    status) hosts_status "$hosts" "$policy" ;;
+    edit) hosts_editor "$root" "$policy" "$plain" ;;
+    apply|save)
+      if [ -z "$root" ] && [ "${DRY_RUN:-false}" != true ] && ! is_root; then printf 'Applying/saving live hosts policy requires sudo\n' >&2; return 1; fi
+      hosts_transaction "$root" "$policy" "$action" ;;
+    rollback)
+      [ -n "$backup" ] || { printf 'Rollback requires --backup SNAPSHOT_DIRECTORY\n' >&2; return 1; }
+      if [ "${DRY_RUN:-false}" = true ]; then printf '[dry-run] Rollback requires matching current files; no changes\n'; return 0; fi
+      if [ -z "$root" ] && ! is_root; then printf 'Live rollback requires sudo\n' >&2; return 1; fi
+      hosts_transaction "$root" "$backup" rollback ;;
+    *) printf 'Usage: unleash hosts {edit|preview|status|apply|save|rollback} [--root DIR] [--policy FILE] [--plain] [--backup DIR]\n' >&2; return 1 ;;
+  esac
+}
+
+hosts_editor_restore() {
+  if [ -n "$hosts_ui_stty" ]; then stty "$hosts_ui_stty" 2>/dev/null || true; fi
+  hosts_ui_stty=""
+  if [ "$hosts_ui_arrows" = true ]; then printf '\033[0m\033[?25h\033[?1049l'; fi
+  hosts_ui_arrows=false
+}
+
+hosts_editor_policy() {
+  local i
+  printf 'version 2\n'
+  awk '$1=="optional" {print}' "$hosts_ui_tmp/original"
+  for ((i=0;i<${#hosts_ui_domains[@]};i++)); do
+    [ "${hosts_ui_overrides[$i]}" = default ] || printf 'override %s %s\n' "${hosts_ui_domains[$i]}" "${hosts_ui_overrides[$i]}"
+  done
+}
+
+hosts_editor() {
+  local hosts_ui_parent_int hosts_ui_parent_stty="" hosts_ui_rc=0 hosts_ui_parent_errexit=false
+  hosts_ui_parent_int=$(trap -p INT)
+  if [ -t 0 ] && command -v stty >/dev/null 2>&1; then
+    hosts_ui_parent_stty=$(stty -g 2>/dev/null) || hosts_ui_parent_stty=""
+  fi
+  # Wait for the editor subshell to restore its terminal before returning.
+  trap ':' INT
+  case $- in *e*) hosts_ui_parent_errexit=true ;; esac
+  # Capture failure without putting the editor in an OR-list, which disables
+  # errexit throughout its body. The editor explicitly enables its own errexit.
+  set +e
+  (
+    set -e
+    hosts_ui_root="$1" hosts_ui_policy="$2" hosts_ui_plain="$3"
+    hosts_ui_tmp=$(mktemp -d) || exit 1
+    hosts_ui_stty="" hosts_ui_arrows=false
+    # Subshell state survives Bash 3.2 EXIT handling; restore before every line prompt.
+    trap 'hosts_editor_restore; rm -rf "$hosts_ui_tmp"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    hosts_resolve "$hosts_ui_policy" config > "$hosts_ui_tmp/original" || exit 1
+    hosts_resolve "$hosts_ui_policy" > "$hosts_ui_tmp/rows" || exit 1
+    hosts_ui_domains=() hosts_ui_overrides=() hosts_ui_selected=0
+    while IFS=$'\t' read -r hosts_ui_domain hosts_ui_override hosts_ui_result hosts_ui_category; do
+      hosts_ui_domains+=("$hosts_ui_domain"); hosts_ui_overrides+=("$hosts_ui_override")
+    done < "$hosts_ui_tmp/rows"
+    hosts_ui_color="" hosts_ui_reset="" hosts_ui_present="" hosts_ui_absent="" hosts_ui_amber="" hosts_ui_shortcut="" hosts_ui_help="" hosts_ui_header=""
+    hosts_ui_capable=false
+    case "${TERM:-dumb}" in xterm*|screen*|tmux*|vt100|vt220|ansi|rxvt*|linux) hosts_ui_capable=true ;; esac
+    if [ -t 1 ] && [ "$hosts_ui_capable" = true ] && [ "${NO_COLOR+x}" != x ]; then
+      hosts_ui_color=$'\033[36m'; hosts_ui_reset=$'\033[0m'; hosts_ui_present=$'\033[32m'; hosts_ui_absent=$'\033[2m'; hosts_ui_amber=$'\033[33m'; hosts_ui_shortcut=$'\033[37m'
+      # Recovery/unadvertised terminals use readable standard light gray.
+      # Apple Terminal commonly advertises 256 colors rather than true color.
+      hosts_ui_help=$'\033[37m'
+      hosts_ui_header=$'\033[1;37m'
+      case "${COLORTERM:-}:${TERM:-}" in
+        truecolor:*|24bit:*|*:*-direct) hosts_ui_shortcut=$'\033[38;2;143;175;199m'; hosts_ui_help=$'\033[38;2;208;208;208m'; hosts_ui_header=$'\033[1;37m' ;;
+        *:*256color*) hosts_ui_shortcut=$'\033[38;5;110m'; hosts_ui_help=$'\033[38;5;252m'; hosts_ui_header=$'\033[1;37m' ;;
+      esac
+    fi
+    while :; do
+      if [ "$hosts_ui_plain" = false ] && [ "$hosts_ui_capable" = true ] && [ -t 0 ] && [ -t 1 ] && command -v stty >/dev/null 2>&1; then
+        hosts_ui_stty=$(stty -g 2>/dev/null) || hosts_ui_stty=""
+        hosts_ui_size=$(stty size 2>/dev/null) || hosts_ui_size='0 0'
+        read -r hosts_ui_rows hosts_ui_columns <<< "$hosts_ui_size"
+        case "$hosts_ui_rows:$hosts_ui_columns" in *[!0-9:]*|:*|*:) hosts_ui_rows=0; hosts_ui_columns=0 ;; esac
+        if [ -n "$hosts_ui_stty" ] && [ "$hosts_ui_rows" -ge "$((${#hosts_ui_domains[@]}+13))" ] && [ "$hosts_ui_columns" -ge 70 ] && stty -echo -icanon min 1 time 0 2>/dev/null; then
+          hosts_ui_arrows=true
+          printf '\033[?1049h\033[?25l\033[H\033[2J'
+        else hosts_editor_restore; hosts_ui_plain=true
+        fi
+      fi
+      hosts_editor_policy > "$hosts_ui_tmp/current"
+      hosts_resolve "$hosts_ui_tmp/current" > "$hosts_ui_tmp/rows" || exit 1
+      printf '%sHOSTS POLICY%s\n' "$hosts_ui_color" "$hosts_ui_reset"
+      printf 'Owned hosts entries only. PF/VPN unchanged.\n\n'
+      hosts_ui_section=""
+      hosts_ui_i=0
+      while IFS=$'\t' read -r hosts_ui_domain hosts_ui_override hosts_ui_result hosts_ui_category; do
+        if [ "$hosts_ui_category" != "$hosts_ui_section" ]; then
+          [ -z "$hosts_ui_section" ] || printf '\n'
+          case "$hosts_ui_category" in
+            core) printf '%sCORE — On by default%s\n' "$hosts_ui_header" "$hosts_ui_reset" ;;
+            optional) printf '%sOPTIONAL — Off by default%s\n' "$hosts_ui_header" "$hosts_ui_reset" ;;
+          esac
+          printf '%s   # %-36s %-5s %s%s\n' "$hosts_ui_header" DOMAIN STATE OVERRIDE "$hosts_ui_reset"
+          hosts_ui_section="$hosts_ui_category"
+        fi
+        hosts_ui_mark=' '
+        hosts_ui_row_color=""
+        if [ "$hosts_ui_i" -eq "$hosts_ui_selected" ]; then hosts_ui_mark='>'; hosts_ui_row_color="$hosts_ui_color"; fi
+        hosts_ui_override_color="$hosts_ui_amber"
+        [ "$hosts_ui_override" != default ] || hosts_ui_override_color="$hosts_ui_absent"
+        hosts_ui_state=Off
+        [ "$hosts_ui_result" != present ] || hosts_ui_state=On
+        hosts_ui_note=default
+        [ "$hosts_ui_override" = default ] || hosts_ui_note="manual override"
+        hosts_ui_entry_color="$hosts_ui_absent"
+        [ "$hosts_ui_result" != present ] || hosts_ui_entry_color="$hosts_ui_present"
+        printf '%s%s %2s %-36s%s %s%-5s%s %s%s%s\n' "$hosts_ui_row_color" "$hosts_ui_mark" "$((hosts_ui_i+1))" "$hosts_ui_domain" "$hosts_ui_reset" "$hosts_ui_entry_color" "$hosts_ui_state" "$hosts_ui_reset" "$hosts_ui_override_color" "$hosts_ui_note" "$hosts_ui_reset"
+        hosts_ui_i=$((hosts_ui_i+1))
+      done < "$hosts_ui_tmp/rows"
+      printf '\n'
+      if [ "$hosts_ui_arrows" = true ]; then
+        printf '%sUp/Down%s: navigate | %sSpace%s: toggle On/Off%s\n' "$hosts_ui_shortcut" "$hosts_ui_help" "$hosts_ui_shortcut" "$hosts_ui_help" "$hosts_ui_reset"
+      else
+        printf '%snumber%s: toggle On/Off%s\n' "$hosts_ui_shortcut" "$hosts_ui_help" "$hosts_ui_reset"
+      fi
+      printf '%sc%s: add optional host | %sr%s: reset defaults | %sv%s: preview%s\n' "$hosts_ui_shortcut" "$hosts_ui_help" "$hosts_ui_shortcut" "$hosts_ui_help" "$hosts_ui_shortcut" "$hosts_ui_help" "$hosts_ui_reset"
+      printf '%ss%s: save choices | %sa%s: preview and apply | %sn%s: numbered | %sq%s: quit%s\n' "$hosts_ui_shortcut" "$hosts_ui_help" "$hosts_ui_shortcut" "$hosts_ui_help" "$hosts_ui_shortcut" "$hosts_ui_help" "$hosts_ui_shortcut" "$hosts_ui_help" "$hosts_ui_reset"
+      hosts_ui_key=""
+      if [ "$hosts_ui_arrows" = true ]; then
+        IFS= read -r -s -n 1 hosts_ui_key || break
+        if [ "$hosts_ui_key" = $'\033' ]; then
+          hosts_ui_part=""
+          if IFS= read -r -s -n 1 -t 1 hosts_ui_part && { [ "$hosts_ui_part" = '[' ] || [ "$hosts_ui_part" = O ]; }; then
+            IFS= read -r -s -n 1 -t 1 hosts_ui_part || hosts_ui_part=""
+            case "$hosts_ui_part" in A) hosts_ui_key=up ;; B) hosts_ui_key=down ;; C) hosts_ui_key=right ;; D) hosts_ui_key=left ;; *) hosts_ui_key=escape ;; esac
+          else hosts_ui_key=escape
+          fi
+        fi
+      else
+        printf 'Choose: '
+        IFS= read -r hosts_ui_key || break
+      fi
+      hosts_ui_was_arrows="$hosts_ui_arrows"
+      hosts_editor_restore
+      case "$hosts_ui_key" in
+        up) hosts_ui_selected=$(((hosts_ui_selected+${#hosts_ui_domains[@]}-1)%${#hosts_ui_domains[@]})) ;;
+        down) hosts_ui_selected=$(((hosts_ui_selected+1)%${#hosts_ui_domains[@]})) ;;
+        ' '|[0-9]*)
+          if [ "$hosts_ui_key" != ' ' ]; then
+            [ "$hosts_ui_was_arrows" != true ] || continue
+            case "$hosts_ui_key" in *[!0-9]*|'') continue ;; esac
+            # Avoid evaluating arbitrary input or octal/oversized arithmetic.
+            [ "${#hosts_ui_key}" -le 5 ] || continue
+            hosts_ui_selected=$((10#$hosts_ui_key-1))
+            [ "$hosts_ui_selected" -ge 0 ] && [ "$hosts_ui_selected" -lt "${#hosts_ui_domains[@]}" ] || { hosts_ui_selected=0; continue; }
+          fi
+          hosts_ui_current=$(awk -F '\t' -v n="$((hosts_ui_selected+1))" 'NR==n {print $3}' "$hosts_ui_tmp/rows")
+          if [ "$hosts_ui_current" = present ]; then
+            if [ "$hosts_ui_selected" -lt 3 ]; then
+              printf 'Turn OFF core host %s? Type OFF to confirm: ' "${hosts_ui_domains[$hosts_ui_selected]}"
+              IFS= read -r hosts_ui_choice || break
+              [ "$hosts_ui_choice" = OFF ] || continue
+              hosts_ui_overrides[hosts_ui_selected]=off
+            else hosts_ui_overrides[hosts_ui_selected]=default
+            fi
+          elif [ "$hosts_ui_selected" -lt 3 ]; then hosts_ui_overrides[hosts_ui_selected]=default
+          else hosts_ui_overrides[hosts_ui_selected]=on
+          fi ;;
+        c)
+          printf 'Exact optional hostname (starts Off): '
+          IFS= read -r hosts_ui_choice || break
+          hosts_editor_policy > "$hosts_ui_tmp/add"
+          printf 'optional %s\n' "$hosts_ui_choice" >> "$hosts_ui_tmp/add"
+          if hosts_resolve "$hosts_ui_tmp/add" config > "$hosts_ui_tmp/validated"; then
+            cp "$hosts_ui_tmp/validated" "$hosts_ui_tmp/original"
+            hosts_resolve "$hosts_ui_tmp/original" > "$hosts_ui_tmp/rows"
+            hosts_ui_domains=() hosts_ui_overrides=()
+            while IFS=$'\t' read -r hosts_ui_domain hosts_ui_override hosts_ui_result hosts_ui_category; do hosts_ui_domains+=("$hosts_ui_domain"); hosts_ui_overrides+=("$hosts_ui_override"); done < "$hosts_ui_tmp/rows"
+          fi ;;
+        r) for ((hosts_ui_i=0;hosts_ui_i<${#hosts_ui_domains[@]};hosts_ui_i++)); do hosts_ui_overrides[hosts_ui_i]=default; done ;;
+        v|a|s)
+          hosts_editor_policy > "$hosts_ui_tmp/current"
+          hosts_preview "$hosts_ui_root/private/etc/hosts" "$hosts_ui_tmp/current" || exit 1
+          if [ "$hosts_ui_key" != v ]; then
+            printf 'Saving changes the policy used by suppression/healing.\n'
+            printf 'Type APPLY to update hosts, SAVE to save choices only (Enter cancels): '
+            IFS= read -r hosts_ui_choice || break
+            hosts_ui_operation=""
+            case "$hosts_ui_choice" in APPLY) hosts_ui_operation=apply ;; SAVE) hosts_ui_operation=save ;; esac
+            if [ -n "$hosts_ui_operation" ]; then cmd_hosts "$hosts_ui_operation" --root "${hosts_ui_root:-/}" --policy "$hosts_ui_tmp/current" || exit 1; fi
+          fi
+          printf 'Enter to return: '; IFS= read -r hosts_ui_choice || break ;;
+        n) hosts_ui_plain=true ;;
+        q|Q|$'\004') break ;;
+      esac
+    done
+    hosts_editor_restore
+  )
+  hosts_ui_rc=$?
+  if [ -n "$hosts_ui_parent_stty" ]; then stty "$hosts_ui_parent_stty" 2>/dev/null || true; fi
+  trap - INT
+  [ -z "$hosts_ui_parent_int" ] || eval "$hosts_ui_parent_int"
+  if [ "$hosts_ui_parent_errexit" = true ]; then set -e; fi
+  return "$hosts_ui_rc"
+}
+
 
 
 PB="${PB:-/usr/libexec/PlistBuddy}"
 
-_restore_rosetta_hosts() {
-	local hosts="$1" tmp_hosts
-	tmp_hosts=$(mktemp "${hosts}.XXXXXX") || return 1
-	if ! cp -p "$hosts" "$tmp_hosts" || ! awk '
-		$0=="# Added by unleash — DEP enrollment block" { owned=1; print; next }
-		owned && /^(0[.]0[.]0[.]0|::)[[:space:]]+configuration[.]apple[.]com[[:space:]]*$/ { next }
-		owned && $0 !~ /^(0[.]0[.]0[.]0|::)[[:space:]]+[[:alnum:]_.-]+[[:space:]]*$/ { owned=0 }
-		{ print }
-	' "$hosts" > "$tmp_hosts"; then
-		rm -f "$tmp_hosts"
-		return 1
-	fi
-	if cmp -s "$hosts" "$tmp_hosts"; then
-		rm -f "$tmp_hosts"
-		return 0
-	fi
-	if [ ! -e "$hosts.unleash-rosetta.bak" ]; then
-		cp -p "$hosts" "$hosts.unleash-rosetta.bak" || { rm -f "$tmp_hosts"; return 1; }
-	fi
-	mv "$tmp_hosts" "$hosts" || { rm -f "$tmp_hosts"; return 1; }
-	info "Removed old Unleash Rosetta blocks; backup: $hosts.unleash-rosetta.bak"
-}
 
 suppress_enrollment() {
 	local data_mount="$1"
@@ -510,7 +1066,7 @@ suppress_enrollment() {
 	if [ "$DRY_RUN" = true ]; then
 		info "[DRY RUN] Would suppress MDM enrollment on $data_mount"
 		info "[DRY RUN]   - Clear DEP markers in ConfigurationProfiles/Settings"
-		info "[DRY RUN]   - Block 13+ Apple MDM domains in /etc/hosts"
+		info "[DRY RUN]   - Reconcile saved hosts-file policy (default: three enrollment hosts)"
 		info "[DRY RUN]   - Disable 4 enrollment daemons in launchd disabled.plist"
 		info "[DRY RUN]   - Clean MDM artifacts from /Users/*/Library"
 		return 0
@@ -535,38 +1091,9 @@ suppress_enrollment() {
 		info "No DEP activation record present."
 	fi
 
-	step "Blocking enrollment domains (Data volume hosts)..."
-	[ -f "$hosts" ] || { mkdir -p "$(dirname "$hosts")"; touch "$hosts"; }
-	_restore_rosetta_hosts "$hosts" || error_exit "Could not repair old Rosetta hosts blocks."
-	grep -q "Added by unleash" "$hosts" 2>/dev/null || {
-		echo "" >>"$hosts"
-		echo "# Added by unleash — DEP enrollment block" >>"$hosts"
-	}
-
-	local domains=(
-		iprofiles.apple.com
-		deviceenrollment.apple.com
-		mdmenrollment.apple.com
-		acmdm.apple.com
-		axm-adm-mdm.apple.com
-		albert.apple.com
-		gdmf.apple.com
-		ax.init-content.apple.com
-		init-content.apple.com
-		xp.apple.com
-		gs.apple.com
-		tb.apple.com
-		vpp.itunes.apple.com
-	)
-	[ -n "$mdm_host" ] && domains+=("$mdm_host")
-
-	local d
-	for d in "${domains[@]}"; do
-		grep -qiE "[[:space:]]$d(\$|[[:space:]])" "$hosts" 2>/dev/null \
-			&& { info "$d already blocked"; continue; }
-		printf '0.0.0.0 %s\n::      %s\n' "$d" "$d" >>"$hosts"
-		success "blocked $d"
-	done
+	step "Reconciling owned hosts entries..."
+	hosts_transaction "$data_mount" "$data_mount/private/etc/unleash-hosts.conf" apply || return 1
+	if [ -n "$mdm_host" ]; then info "Discovered organization host is not added automatically; select it explicitly in hosts policy."; fi
 
 	step "Resetting DEP markers..."
 	mkdir -p "$cfg"
@@ -775,6 +1302,7 @@ check_disk_space() {
 }
 
 backup_state() {
+	if [ "${DRY_RUN:-false}" = true ]; then printf '[dry-run] backup: no changes\n'; return 0; fi
 	local data_mount="$1"
 	mkdir -p "$BACKUP_DIR"
 	check_disk_space "$data_mount"
@@ -805,6 +1333,7 @@ backup_state() {
 }
 
 restore_state() {
+	if [ "${DRY_RUN:-false}" = true ]; then printf '[dry-run] restore: no changes\n'; return 0; fi
 	[ -f "$BACKUP_DIR/timestamp" ] || error_exit "No backup found at $BACKUP_DIR"
 
 	local data_mount
@@ -822,8 +1351,9 @@ restore_state() {
 	echo -e "${YEL}Target: $data_mount${NC}"
 
 	if [ -f "$BACKUP_DIR/hosts.backup" ]; then
-		cp "$BACKUP_DIR/hosts.backup" "$data_mount/private/etc/hosts"
-		success "hosts restored"
+		hosts_restore_owned_backup "$data_mount" "$BACKUP_DIR/hosts.backup" || return 1
+		info "Recognized owned hosts mappings restored; unrelated current entries preserved."
+		info "Raw hosts backup retained for reference; saved hosts policy now reflects restored mappings."
 	fi
 
 	if [ -d "$BACKUP_DIR/ConfigurationProfiles" ]; then
@@ -840,7 +1370,6 @@ restore_state() {
 		success "launchd override restored"
 	fi
 
-	sed -i '' '/# Added by unleash/d' "$data_mount/private/etc/hosts" 2>/dev/null || true
 
 	rm -f "$BACKUP_DIR/data_volume_path" "$BACKUP_DIR/timestamp"
 	success "Restore complete"
@@ -878,23 +1407,8 @@ check_mdm_status() {
 	fi
 	echo ""
 
-	step "Blocked domains in hosts"
-	if [ -f "$hosts" ]; then
-		local matches
-		matches=$(grep -iE 'iprofiles|enrollment|mdm|acmdm|albert|gdmf|configuration|xp\.apple|gs\.apple|tb\.apple' "$hosts" 2>/dev/null)
-		if [ -n "$matches" ]; then
-			echo "$matches" | while IFS= read -r line; do
-				echo -e "  ${GRN}$line${NC}"
-			done
-		else
-			echo -e "  ${YEL}(none)${NC}"
-		fi
-		local count; count=$(echo "$matches" | grep -c . 2>/dev/null || true)
-		count="${count:-0}"
-		echo -e "  ${CYAN}Total: $count of 13 expected domains blocked${NC}"
-	else
-		echo -e "  ${YEL}(hosts not found)${NC}"
-	fi
+	step "Owned hosts entries"
+	hosts_status "$hosts" "$data_mount/private/etc/unleash-hosts.conf" || return 1
 	echo ""
 
 	step "Enrollment daemon status"
@@ -1108,12 +1622,8 @@ heal_suppress() {
 
 	step "Checking current MDM suppression state..."
 	local cfg="${data_mount}/private/var/db/ConfigurationProfiles/Settings"
-	local hosts="${data_mount}/private/etc/hosts"
 	local ldp="${data_mount}/private/var/db/com.apple.xpc.launchd/disabled.plist"
 
-	if [ "$DRY_RUN" != true ] && [ -f "$hosts" ]; then
-		_restore_rosetta_hosts "$hosts" || error_exit "Could not repair old Rosetta hosts blocks."
-	fi
 
 	local needs_heal=false
 
@@ -1124,15 +1634,10 @@ heal_suppress() {
 		info "DEP markers clean"
 	fi
 
-	if [ -f "$hosts" ]; then
-		if grep -q "iprofiles.apple.com" "$hosts" 2>/dev/null; then
-			info "Domain block active"
-		else
-			warn "Domain block missing"
-			needs_heal=true
-		fi
+	if hosts_policy_matches "$data_mount"; then
+		info "Owned hosts entries match saved policy"
 	else
-		warn "Hosts file missing"
+		warn "Owned hosts entries need reconciliation"
 		needs_heal=true
 	fi
 
@@ -1570,9 +2075,7 @@ restore_hosts_based_block() {
   [ -n "$data_mount" ] && root="$data_mount"
   local hosts="${root}/private/etc/hosts"
 
-  if [ -f "$hosts" ] && grep -q "Added by unleash" "$hosts" 2>/dev/null; then
-    info "unleash hosts entries intact"
-  fi
+  hosts_status "$hosts" "$root/private/etc/unleash-hosts.conf"
 }
 
 run_preformat_check() {
@@ -1687,12 +2190,7 @@ check_upgrade_safety() {
     issues=$((issues + 1))
   fi
 
-  if grep -q "iprofiles.apple.com" /private/etc/hosts 2>/dev/null; then
-    echo -e "  ${GRN}Hosts block active${NC}"
-  else
-    echo -e "  ${YEL}Hosts block not found${NC}"
-    issues=$((issues + 1))
-  fi
+  hosts_status /private/etc/hosts /private/etc/unleash-hosts.conf || return 1
 
   echo ""
   if [ "$issues" -eq 0 ]; then
@@ -2017,7 +2515,6 @@ monitor_mdm() {
   echo "$(date) Monitor started (interval ${interval}s)" >> "$logfile"
 
   local cfg="/private/var/db/ConfigurationProfiles/Settings"
-  local hosts="/private/etc/hosts"
 
   trap 'echo "$(date) Monitor stopped" >> "$logfile"; rm -f "$pidfile"; exit 0' INT TERM
 
@@ -2030,9 +2527,9 @@ monitor_mdm() {
       reason="DEP record found"
     fi
 
-    if [ -f "$hosts" ] && ! grep -q "iprofiles.apple.com" "$hosts" 2>/dev/null; then
+    if ! hosts_policy_matches ""; then
       state="dirty"
-      reason="Hosts block missing"
+      reason="Owned hosts policy needs reconciliation"
     fi
 
     if command -v profiles &>/dev/null; then
@@ -2453,6 +2950,10 @@ do_self_update() {
 }
 
 do_uninstall() {
+  if [ "${DRY_RUN:-false}" = true ]; then
+    printf '[dry-run] uninstall: no changes\n'
+    return 0
+  fi
   header "Unleash — Full Uninstall"
 
   if ! is_root; then
@@ -2479,6 +2980,17 @@ do_uninstall() {
     end_fail; echo "     Not installed"
   fi
 
+  begin "Stopping monitor if running"
+  local pidfile="/tmp/unleash-monitor.pid"
+  if [ -f "$pidfile" ]; then
+    kill "$(cat "$pidfile")" 2>/dev/null || true
+    rm -f "$pidfile"
+    end_ok
+  else
+    end_fail; echo "     Not running"
+  fi
+
+
   begin "Cleaning pf anchors"
   local anchors=("/etc/pf.anchors/com.unleash/mdm" "/etc/pf.anchors/com.unleash.selective")
   for a in "${anchors[@]}"; do
@@ -2495,19 +3007,9 @@ do_uninstall() {
   pfctl -f /etc/pf.conf 2>/dev/null || true
   end_ok
 
-  begin "Cleaning hosts entries"
-  local hosts="/private/etc/hosts"
-  if [ -f "$hosts" ]; then
-    sed -i '' '/# Added by unleash/d' "$hosts" 2>/dev/null || true
-    local domains=("iprofiles.apple.com" "deviceenrollment.apple.com" "mdmenrollment.apple.com")
-    for d in "${domains[@]}"; do
-      sed -i '' "/[[:space:]]$d/d" "$hosts" 2>/dev/null || true
-      sed -i '' "/::$d/d" "$hosts" 2>/dev/null || true
-    done
-    end_ok
-  else
-    end_fail; echo "     Not found"
-  fi
+  begin "Removing owned hosts entries"
+  hosts_remove "" || return 1
+  end_ok
 
   begin "Restoring launchd overrides"
   local ldp="/private/var/db/com.apple.xpc.launchd/disabled.plist"
@@ -2538,15 +3040,6 @@ do_uninstall() {
     end_fail; echo "     Not found"
   fi
 
-  begin "Stopping monitor if running"
-  local pidfile="/tmp/unleash-monitor.pid"
-  if [ -f "$pidfile" ]; then
-    kill "$(cat "$pidfile")" 2>/dev/null || true
-    rm -f "$pidfile"
-    end_ok
-  else
-    end_fail; echo "     Not running"
-  fi
 
   echo ""
   success "Uninstall complete"
@@ -2632,15 +3125,8 @@ generate_report() {
   done
   echo ""
 
-  step "Hosts Block"
-  if grep -q "iprofiles.apple.com" /private/etc/hosts 2>/dev/null; then
-    local blocked
-    blocked=$(grep -c "0.0.0.0" /private/etc/hosts 2>/dev/null || true)
-    blocked="${blocked:-0}"
-    echo "  $blocked domain(s) blocked in /etc/hosts"
-  else
-    echo "  No block entries found"
-  fi
+  step "Owned hosts entries"
+  hosts_status /private/etc/hosts /private/etc/unleash-hosts.conf || return 1
   echo ""
 
   step "Running MDM Processes"
@@ -2705,10 +3191,9 @@ generate_report_json() {
   report="${report}    \"selective_block_active\": $selective_active\n"
   report="${report}  },\n"
 
-  local hosts_blocked=0
-  hosts_blocked=$(grep -c "0.0.0.0" /private/etc/hosts 2>/dev/null || true)
-  hosts_blocked="${hosts_blocked:-0}"
-  report="${report}  \"hosts_blocked\": $hosts_blocked\n"
+  local hosts_owned_domains
+  hosts_owned_domains=$(hosts_owned_count /private/etc/hosts) || return 1
+  report="${report}  \"hosts_owned_domains\": $hosts_owned_domains\n"
 
   report="${report}}"
 
@@ -3214,13 +3699,12 @@ cmd_suggest() {
     fi
   fi
 
-  local hosts="/etc/hosts"
-  if [ -f "$hosts" ] && grep -q "mdmenrollment.apple.com" "$hosts" 2>/dev/null; then
-    echo -e "${GRN}✓ MDM domains blocked${NC}"
+  if hosts_policy_matches ""; then
+    info "Owned hosts entries match saved policy (including individual overrides)."
   else
-    echo -e "${YEL}⚠ MDM domains not blocked${NC}"
+    warn "Owned hosts entries differ from saved policy."
     score=$((score + 5))
-    recommendations="$recommendations\n  - Run 'sudo ./unleash firewall' for pf-level block"
+    recommendations="$recommendations\n  - Run './unleash hosts preview' to inspect owned hosts changes"
   fi
 
   if command -v pfctl &>/dev/null; then
@@ -3313,14 +3797,9 @@ cmd_remediate() {
   local extra_domains=""
   extra_domains=$(known_orgs | grep "^$org:" | cut -d: -f3 || true)
 
-  local hosts_file="/etc/hosts"
-  if [ -n "$extra_domains" ] && [ -f "$hosts_file" ]; then
-    for domain in $(echo "$extra_domains" | tr ',' ' '); do
-      if ! grep -q "$domain" "$hosts_file" 2>/dev/null; then
-        echo "0.0.0.0 $domain" >> "$hosts_file"
-        info "Blocked: $domain"
-      fi
-    done
+  if [ -n "$extra_domains" ]; then
+    info "Organization hints are not added to hosts automatically: $extra_domains"
+    info "Use 'unleash hosts edit' to select exact hosts explicitly."
   fi
 
   info "Running harden..."
@@ -3515,6 +3994,7 @@ show_cmd_help() {
 		firewall-off) echo "Remove pf MDM block." ;;
 		harden)     echo "Kill MDM processes + remove profiles + flush DNS." ;;
 		audit)      echo "Deep system scan with risk score." ;;
+		hosts) echo "Hosts-only policy: hosts {edit|preview|status|apply|save|rollback} [--root DIR] [--policy FILE] [--plain] [--backup DIR]" ;;
 		whitelist)  echo "Block only MDM domains, keep iCloud/App Store." ;;
 		backup)     echo "Save current state." ;;
 		restore)    echo "Restore from backup." ;;
@@ -3562,6 +4042,7 @@ Bypass / suppress / monitor MDM enrollment on macOS.
   COMMANDS
 
   Core:
+    hosts           Select, preview, and reconcile owned hosts-file entries.
     bypass          Full MDM bypass from Recovery (creates admin user)
     suppress        Silence enrollment, no user created
     admin           Create an admin user without suppressing enrollment
@@ -3755,10 +4236,8 @@ cmd_dualboot() {
 	create_admin_user "$node" "$data_path" "$username" "$realName" "$passw" "$uid"
 	touch "$data_path/private/var/db/.AppleSetupDone"
 
-	begin "Blocking domains"
-	local hosts_file="$data_path/private/etc/hosts"
-	[ -f "$hosts_file" ] || touch "$hosts_file"
-	printf '%s\n' "0.0.0.0 deviceenrollment.apple.com" "0.0.0.0 mdmenrollment.apple.com" "0.0.0.0 iprofiles.apple.com" >>"$hosts_file"
+	begin "Reconciling target hosts policy"
+	hosts_transaction "$data_path" "$data_path/private/etc/unleash-hosts.conf" apply || return 1
 	end_ok
 
 	begin "Resetting config profiles"
@@ -4099,6 +4578,7 @@ main() {
 		firewall-off|fw-off) cmd_firewall_off ;;
 		harden)           cmd_harden ;;
 		audit)            cmd_audit "${2:-}" ;;
+		hosts)           shift; cmd_hosts "$@" ;;
 		whitelist|wl)     cmd_whitelist ;;
 		backup)           cmd_backup ;;
 		restore)          cmd_restore ;;
