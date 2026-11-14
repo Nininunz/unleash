@@ -7,8 +7,10 @@ check_volume_output() {
     local script="$BATS_TEST_DIRNAME/../$entrypoint"
     local target="$BATS_TEST_TMPDIR/$entrypoint/Data volume"
     mkdir -p "$target/private/var/db/dslocal/nodes/Default"
+    export UNLEASH_TEST_SOURCE="$BATS_TEST_TMPDIR/entrypoint.sh"
+    sed '/^main "\$@"$/d' "$script" > "$UNLEASH_TEST_SOURCE"
     run --separate-stderr bash -u -c '
-      source <(sed '\''/^main "\$@"$/d'\'' "$1")
+      source "$UNLEASH_TEST_SOURCE"
       target="$2"; mode="$3"; mounted="$4"
       diskutil() {
         case "$*" in

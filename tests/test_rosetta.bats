@@ -3,8 +3,10 @@
 suppress_fixture() {
   local script="$1" target="$2"
   local action="${3:-suppress_enrollment}" simulation="${4:-false}"
+  export UNLEASH_TEST_SOURCE="$BATS_TEST_TMPDIR/entrypoint.sh"
+  sed '/^main "\$@"$/d' "$script" > "$UNLEASH_TEST_SOURCE"
   run bash -u -c '
-    source <(sed '\''/^main "\$@"$/d'\'' "$1")
+    source "$UNLEASH_TEST_SOURCE"
     DRY_RUN="$4"
     "$3" "$2"
   ' "$script" "$script" "$target" "$action" "$simulation"

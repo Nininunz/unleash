@@ -51,8 +51,10 @@ teardown() {
 @test "diagnostics use stderr without contaminating helper return values" {
   local source_file
   for source_file in lib/colors.sh unleash-standalone.sh; do
+    export UNLEASH_TEST_SOURCE="$BATS_TEST_TMPDIR/log-functions.sh"
+    sed '/^error_exit()/,$d' "$BATS_TEST_DIRNAME/../$source_file" > "$UNLEASH_TEST_SOURCE"
     run --separate-stderr bash -u -c '
-      source <(sed "/^error_exit()/,\$d" "$1")
+      source "$UNLEASH_TEST_SOURCE"
       volume_path() {
         log INFO "Locating Data volume"
         log OK "Data volume found"
