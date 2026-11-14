@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Fixed
+- Prompt answers are assigned literally instead of being evaluated as shell code,
+  preserving spaces, quotes, backslashes, and substitution syntax. Adapted from
+  [ejams1's original `printf -v` approach](https://github.com/ejams1/unleash/commit/574b70a),
+  with caller-variable collision protection for Bash 3.2.
 - The standalone builder follows the entrypoint's module list so regenerated
   scripts include all required modules.
 

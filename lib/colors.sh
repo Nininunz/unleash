@@ -103,14 +103,22 @@ end_fail() {
   echo -e "${RED}✗${NC}"
 }
 
+# Only scalar identifiers are supported. Reserve our locals' prefix so Bash's
+# dynamic scoping cannot silently assign to a helper local instead of the caller.
+prompt_destination_valid() {
+  if [[ ! "$1" =~ ^[a-zA-Z_][a-zA-Z0-9_]*$ ]] || [[ "$1" == __unleash_prompt_* ]]; then
+    printf '%s\n' 'Invalid prompt destination variable' >&2
+    return 1
+  fi
+}
+
+# Literal printf -v assignment adapted from ejams1's approach:
+# https://github.com/ejams1/unleash/commit/574b70a
 prompt_default() {
-  local var_name="$1"
-  local prompt_text="$2"
-  local default="$3"
-  local value
-  read -r -p "${CYAN}${prompt_text}${NC} (default '${default}'): " value
-  value="${value:=$default}"
-  eval "$var_name=\"$value\""
+  prompt_destination_valid "$1" || return 1
+  local __unleash_prompt_value
+  IFS= read -r -p "${CYAN}${2}${NC} (default '${3}'): " __unleash_prompt_value || return 1
+  printf -v "$1" '%s' "${__unleash_prompt_value:-$3}"
 }
 
 confirm() {
