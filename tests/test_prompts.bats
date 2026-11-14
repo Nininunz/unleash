@@ -10,8 +10,9 @@ import pathlib
 import re
 import sys
 source = pathlib.Path(sys.argv[1]).read_text()
-names = ('prompt_destination_valid', 'prompt_default', 'validate_username',
-         'validate_password', 'prompt_username', 'prompt_password')
+names = ('prompt_destination_valid', 'prompt_default', 'account_has_control_chars',
+         'validate_fullname', 'validate_username', 'validate_password',
+         'prompt_account_field', 'prompt_fullname', 'prompt_username', 'prompt_password')
 functions = []
 for name in names:
     matches = re.findall(r'^' + name + r'\(\) \{.*?^\}', source, re.M | re.S)
@@ -52,4 +53,12 @@ check_prompt_case() {
 
 @test "validated prompts still reprompt before assigning" {
   check_prompt_case reprompt
+}
+
+@test "account fields enforce separate boundaries and preserve literal permitted text" {
+  check_prompt_case fields
+}
+
+@test "invalid fields display specific warnings without password contents" {
+  check_prompt_case messages
 }

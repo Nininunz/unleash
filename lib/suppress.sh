@@ -170,15 +170,16 @@ admin_only_mode() {
 	echo ""
 	step "Creating local admin account"
 
-	prompt_default realName "Full name" "Apple"
+	local realName
+	prompt_fullname realName || return 1
 
-	local username
+	local username recreate_user=false
 	while true; do
-		prompt_username username
+		prompt_username username || return 1
 		if check_user_exists "$node" "$username"; then
 			warn "User '$username' already exists."
 			if confirm "Delete and recreate?"; then
-				delete_user "$node" "$data_mount" "$username"
+				recreate_user=true
 				break
 			else
 				echo -e "${YEL}Choose a different username.${NC}"
@@ -189,7 +190,11 @@ admin_only_mode() {
 	done
 
 	local passw
-	prompt_password passw
+	prompt_password passw || return 1
+
+	if [ "$recreate_user" = true ]; then
+		delete_user "$node" "$data_mount" "$username"
+	fi
 
 	local uid
 	uid=$(find_available_uid "$node")
@@ -227,15 +232,15 @@ full_bypass_mode() {
 	step "Creating temporary admin account"
 
 	local realName
-	prompt_default realName "Full name" "Apple"
+	prompt_fullname realName || return 1
 
-	local username
+	local username recreate_user=false
 	while true; do
-		prompt_username username
+		prompt_username username || return 1
 		if check_user_exists "$node" "$username"; then
 			warn "User '$username' already exists."
 			if confirm "Delete and recreate?"; then
-				delete_user "$node" "$data_mount" "$username"
+				recreate_user=true
 				break
 			else
 				echo -e "${YEL}Choose a different username.${NC}"
@@ -246,7 +251,11 @@ full_bypass_mode() {
 	done
 
 	local passw
-	prompt_password passw
+	prompt_password passw || return 1
+
+	if [ "$recreate_user" = true ]; then
+		delete_user "$node" "$data_mount" "$username"
+	fi
 
 	local uid
 	uid=$(find_available_uid "$node")

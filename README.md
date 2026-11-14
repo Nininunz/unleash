@@ -81,6 +81,10 @@ Creates a hidden local administrator account on the system without performing an
 5. Hides the account from the macOS login window via dscl
 6. Conceals the user's home directory in `/Users` using filesystem flags
 
+See [account input rules](docs/account-inputs.md) for field policies, defaults,
+literal input handling, and cancellation behavior in `admin`, `bypass`, and
+`dualboot`.
+
 ### heal — Check and re-apply
 
 ```bash

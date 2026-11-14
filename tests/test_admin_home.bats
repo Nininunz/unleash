@@ -22,7 +22,7 @@ run_admin_home() {
     load_config() { :; }
     is_root() { return 0; }
     resolve_target_volumes() { printf "%s|%s\n" "$target-system" "$target"; }
-    prompt_default() { printf -v "$1" "%s" "Fixture User"; }
+    prompt_fullname() { printf -v "$1" "%s" "Fixture User"; }
     prompt_username() { printf -v "$1" "%s" fixture; }
     prompt_password() { printf -v "$1" "%s" fixture-password; }
     find_available_uid() { echo 501; }

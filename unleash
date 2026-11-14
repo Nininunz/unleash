@@ -259,11 +259,11 @@ cmd_dualboot() {
 	step "Creating admin account on target"
 
 	local realName
-	prompt_default realName "Full name" "Apple"
+	prompt_fullname realName || return 1
 	local username
-	prompt_username username
+	prompt_username username || return 1
 	local passw
-	prompt_password passw
+	prompt_password passw || return 1
 	local uid
 	uid=$(find_available_uid "$node")
 

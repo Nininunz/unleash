@@ -52,6 +52,11 @@ create_admin_user() {
 	local password="$5"
 	local uid="$6"
 
+	local validation_message
+	validation_message=$(validate_username "$username") || error_exit "$validation_message"
+	validation_message=$(validate_fullname "$realname") || error_exit "$validation_message"
+	validation_message=$(validate_password "$password") || error_exit "$validation_message"
+
 	local user_home="$data_mount/Users/$username"
 	if check_user_exists "$node" "$username"; then
 		error_exit "User '$username' already exists; choose a new username."
