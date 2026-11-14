@@ -4,8 +4,10 @@
   local entrypoint
   for entrypoint in unleash unleash-standalone.sh; do
     local script="$BATS_TEST_DIRNAME/../$entrypoint"
+    export UNLEASH_TEST_SOURCE="$BATS_TEST_TMPDIR/entrypoint.sh"
+    sed '/^main "\$@"$/d' "$script" > "$UNLEASH_TEST_SOURCE"
     run bash -u -c '
-      source <(sed '\''/^main "\$@"$/d'\'' "$1")
+      source "$UNLEASH_TEST_SOURCE"
       is_recovery() { return 1; }
       resolve_data_volume() { echo TARGET_WAS_ACCESSED; }
       admin_only_mode() { echo ADMIN_FLOW_WAS_STARTED; }
@@ -22,8 +24,10 @@
   local entrypoint
   for entrypoint in unleash unleash-standalone.sh; do
     local script="$BATS_TEST_DIRNAME/../$entrypoint"
+    export UNLEASH_TEST_SOURCE="$BATS_TEST_TMPDIR/entrypoint.sh"
+    sed '/^main "\$@"$/d' "$script" > "$UNLEASH_TEST_SOURCE"
     run bash -u -c '
-      source <(sed '\''/^main "\$@"$/d'\'' "$1")
+      source "$UNLEASH_TEST_SOURCE"
       DRY_RUN=true
       is_recovery() { return 0; }
       resolve_data_volume() { echo TARGET_WAS_ACCESSED; }
