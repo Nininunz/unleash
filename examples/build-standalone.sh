@@ -1,4 +1,6 @@
 #!/bin/bash
+set -euo pipefail
+
 OUT="unleash-standalone.sh"
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -14,7 +16,10 @@ SCRIPT_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
 SCRIPT_PATH="\$SCRIPT_DIR/\$(basename "\$0")"
 HEADER
 
-for lib in colors config detect validate dscl suppress backup status launchd heal firewall harden whitelist check monitor history doctor selfupdate uninstall report ma_detect demo vpn; do
+# Follow the entrypoint's module list so a rebuild cannot omit dependencies.
+LIBS="$(sed -n 's/^for _lib in \(.*\); do$/\1/p' "$SCRIPT_DIR/unleash")"
+[ -n "$LIBS" ] || { echo "Cannot identify the module loader" >&2; exit 1; }
+for lib in $LIBS; do
   tail -n +1 "$SCRIPT_DIR/lib/$lib.sh" >> "$OUT"
   echo "" >> "$OUT"
 done
