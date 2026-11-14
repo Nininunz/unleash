@@ -5,7 +5,7 @@ setup() {
   load '../lib/colors.sh'
   load '../lib/detect.sh'
   load '../lib/suppress.sh'
-  TEST_DIR=$(mktemp -d)
+  TEST_DIR="$BATS_TEST_TMPDIR/volume"
   mkdir -p "$TEST_DIR/private/etc"
   mkdir -p "$TEST_DIR/private/var/db/ConfigurationProfiles/Settings"
   mkdir -p "$TEST_DIR/private/var/db/com.apple.xpc.launchd"
@@ -76,7 +76,9 @@ teardown() {
 </dict></plist>
 XML
   DRY_RUN=false
-  suppress_enrollment "$TEST_DIR" 2>/dev/null || true
-  run grep -c "mdm.acme.com" "$TEST_DIR/private/etc/hosts"
-  [ "$output" -gt 0 ]
+  run plutil -convert xml1 -o - "$TEST_DIR/private/var/db/ConfigurationProfiles/Settings/.cloudConfigRecordFound"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"https://mdm.acme.com/enroll"* ]]
+  suppress_enrollment "$TEST_DIR"
+  grep -Fq '0.0.0.0 mdm.acme.com' "$TEST_DIR/private/etc/hosts"
 }
