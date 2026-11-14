@@ -18,6 +18,20 @@ killall() { echo unexpected > "$HOSTS_TEST_ROOT/unexpected"; return 99; }
 is_root() { return 1; }
 fail() { if "$@"; then printf 'Unexpected success\n' >&2; exit 1; fi; }
 case "$1" in
+ editor-policy-failure)
+  set +e
+  /bin/bash -euo pipefail -c '
+    source "$HOSTS_TEST_DEFS"
+    hosts_editor_policy() { return 71; }
+    hosts_editor "$HOSTS_TEST_ROOT/target" "$HOSTS_TEST_ROOT/policy" true
+  ' <<< q > "$HOSTS_TEST_ROOT/editor-output"
+  rc=$?
+  set -e
+  [ "$rc" -eq 71 ]
+  ! grep -q 'Choose:' "$HOSTS_TEST_ROOT/editor-output"
+  cmp "$hosts" "$HOSTS_TEST_ROOT/original"
+  [ ! -e "$root/private/etc/unleash-hosts.conf" ]
+  ;;
  legacy-restore)
   # Unmarked backups cannot be interpreted as permission to clear core blocks.
   cp "$hosts" "$HOSTS_TEST_ROOT/old-backup"

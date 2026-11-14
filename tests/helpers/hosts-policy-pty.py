@@ -35,12 +35,17 @@ def until(needle):
             if not chunk: raise AssertionError('Exited early: '+repr(output[-2000:]))
             output+=chunk
 try:
-    if mode in ['arrows','resize','interrupt','color','slate-truecolor','slate-fallback']:
+    if mode in ['arrows','resize','interrupt','interrupt-idle','color','slate-truecolor','slate-fallback']:
         until(b'\x1b[?1049h')
-        os.write(master,b' ')
-        until(b'Type OFF to confirm: ')
-        os.write(master,b'OFF\n')
-        until(b'manual override')
+        if mode=='interrupt-idle':
+            # Interrupt a blocked key read, rather than racing the redraw.
+            until(b'quit')
+            time.sleep(.1)
+        else:
+            os.write(master,b' ')
+            until(b'Type OFF to confirm: ')
+            os.write(master,b'OFF\n')
+            until(b'manual override')
         if mode=='resize':
             output=b''
             fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',8,100,0,0))
@@ -48,7 +53,7 @@ try:
             until(b'Choose: ')
             assert b'manual override' in output
             os.write(master,b'q\n')
-        elif mode=='interrupt':
+        elif mode in ['interrupt','interrupt-idle']:
             os.write(master,b'\x03')
         else:
             output=b'' if mode not in ['color','slate-truecolor','slate-fallback'] else output
@@ -74,7 +79,8 @@ try:
             except OSError: break
     if p.poll() is None: raise AssertionError('Did not exit: '+repr(output[-3000:]))
     p.wait(timeout=1)
-    assert p.returncode==0 or (mode=='interrupt' and p.returncode in [-2,130]),p.returncode
+    expected_rc=130 if mode in ['interrupt','interrupt-idle'] else 0
+    assert p.returncode==expected_rc,p.returncode
     if mode=='color': assert b'\x1b[38;5;110m' in output
     elif mode=='slate-truecolor': assert b'\x1b[38;2;143;175;199m' in output
     elif mode=='slate-fallback': assert b'\x1b[37m' in output and b'\x1b[38;' not in output

@@ -828,7 +828,19 @@ hosts_editor_policy() {
 }
 
 hosts_editor() {
+  local hosts_ui_parent_int hosts_ui_parent_stty="" hosts_ui_rc=0 hosts_ui_parent_errexit=false
+  hosts_ui_parent_int=$(trap -p INT)
+  if [ -t 0 ] && command -v stty >/dev/null 2>&1; then
+    hosts_ui_parent_stty=$(stty -g 2>/dev/null) || hosts_ui_parent_stty=""
+  fi
+  # Wait for the editor subshell to restore its terminal before returning.
+  trap ':' INT
+  case $- in *e*) hosts_ui_parent_errexit=true ;; esac
+  # Capture failure without putting the editor in an OR-list, which disables
+  # errexit throughout its body. The editor explicitly enables its own errexit.
+  set +e
   (
+    set -e
     hosts_ui_root="$1" hosts_ui_policy="$2" hosts_ui_plain="$3"
     hosts_ui_tmp=$(mktemp -d) || exit 1
     hosts_ui_stty="" hosts_ui_arrows=false
@@ -978,6 +990,12 @@ hosts_editor() {
     done
     hosts_editor_restore
   )
+  hosts_ui_rc=$?
+  if [ -n "$hosts_ui_parent_stty" ]; then stty "$hosts_ui_parent_stty" 2>/dev/null || true; fi
+  trap - INT
+  [ -z "$hosts_ui_parent_int" ] || eval "$hosts_ui_parent_int"
+  if [ "$hosts_ui_parent_errexit" = true ]; then set -e; fi
+  return "$hosts_ui_rc"
 }
 
 

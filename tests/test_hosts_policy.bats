@@ -191,3 +191,11 @@ PY
 @test "full uninstall stops background writers before hosts cleanup and retains its snapshot" {
   check_case full-uninstall
 }
+
+@test "PTY Ctrl-C during idle key read restores terminal and returns 130" {
+  check_case pty-interrupt-idle
+}
+
+@test "editor policy generation failure aborts before input without writes" {
+  check_case editor-policy-failure
+}
