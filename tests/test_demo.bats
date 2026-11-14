@@ -3,6 +3,8 @@
 setup() {
   load '../lib/colors.sh'
   load '../lib/demo.sh'
+  # Presentation pacing is unnecessary when asserting demo behavior.
+  sleep() { :; }
 }
 
 @test "run_demo exits cleanly" {

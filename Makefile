@@ -1,10 +1,12 @@
 .PHONY: lint test build check-build clean ci
 
+BATS_FLAGS ?=
+
 lint:
 	python3 scripts/check-shell.py
 
 test:
-	bats tests/*.bats
+	bats $(BATS_FLAGS) tests/*.bats
 
 build:
 	./examples/build-standalone.sh
