@@ -18,6 +18,87 @@ killall() { echo unexpected > "$HOSTS_TEST_ROOT/unexpected"; return 99; }
 is_root() { return 1; }
 fail() { if "$@"; then printf 'Unexpected success\n' >&2; exit 1; fi; }
 case "$1" in
+ preview-disappeared-input)
+  command() { if [ "$*" = '-v diff' ]; then return 1; fi; builtin command "$@"; }
+  printf 'old\n' > "$HOSTS_TEST_ROOT/old"
+  printf 'new\n' > "$HOSTS_TEST_ROOT/new"
+  awk() {
+    builtin command awk "$@" || return $?
+    if [ "$1" = 'END {print NR+0}' ] && [ "$2" = "$HOSTS_TEST_ROOT/old" ]; then rm "$2"; fi
+  }
+  rc=0
+  hosts_preview_diff "$HOSTS_TEST_ROOT/old" "$HOSTS_TEST_ROOT/new" > "$HOSTS_TEST_ROOT/preview" 2>/dev/null || rc=$?
+  [ "$rc" -eq 2 ]
+  ;;
+ preview-partial-read)
+  command() { if [ "$*" = '-v diff' ]; then return 1; fi; builtin command "$@"; }
+  cat() {
+    case "$1" in
+      */candidate) head -n 1 "$1"; return 74 ;;
+      *) builtin command cat "$@" ;;
+    esac
+  }
+  rc=0
+  printf 'a\nAPPLY\n' | cmd_hosts edit --root "$root" --policy "$policy" --plain > "$HOSTS_TEST_ROOT/editor-output" || rc=$?
+  [ "$rc" -ne 0 ]
+  ! grep -q 'Type APPLY' "$HOSTS_TEST_ROOT/editor-output"
+  cmp "$hosts" "$HOSTS_TEST_ROOT/original"
+  [ ! -e "$root/private/etc/unleash-hosts.conf" ]
+  ;;
+ recovery-utilities)
+  command() { if [ "$*" = '-v diff' ] || [ "$*" = '-v cmp' ]; then return 1; fi; builtin command "$@"; }
+  cmp() { echo 'unexpected cmp dependency' >&2; return 99; }
+  diff() { echo 'unexpected diff dependency' >&2; return 99; }
+  hosts_preview "$hosts" "$policy" > "$HOSTS_TEST_ROOT/preview"
+  grep -Fx '+0.0.0.0 iprofiles.apple.com' "$HOSTS_TEST_ROOT/preview"
+  hosts_transaction "$root" "$policy"
+  hosts_policy_matches "$root"
+  hosts_same_file "$hosts" "$hosts"
+  backup=$(find "$root/private/etc" -name '.unleash-hosts-backup.*' -type d | head -1)
+  hosts_transaction "$root" "$backup" rollback
+  hosts_files_equal "$hosts" "$HOSTS_TEST_ROOT/original"
+  ;;
+ comparison-read-failure)
+  printf 'different\n' > "$HOSTS_TEST_ROOT/other"
+  # Both empty and partial failed reads must be errors, even for equal files.
+  od() {
+    if [ "$failure_side" = both ] || [ "$4" = "$failure_side" ]; then
+      if [ "$failure_output" = partial ]; then printf ' 61\n'; fi
+      return 1
+    fi
+    builtin command od "$@"
+  }
+  for failure_side in both "$hosts" "$HOSTS_TEST_ROOT/other"; do
+    for failure_output in empty partial; do
+      actual=0
+      hosts_files_equal "$hosts" "$HOSTS_TEST_ROOT/other" || actual=$?
+      [ "$actual" -eq 2 ]
+    done
+  done
+  failure_side=both
+  actual=0; hosts_files_equal "$hosts" "$hosts" || actual=$?
+  [ "$actual" -eq 2 ]
+  cmp "$hosts" "$HOSTS_TEST_ROOT/original"
+  ;;
+ exact-comparison)
+  python3 - "$HOSTS_TEST_ROOT" <<'BYTES'
+from pathlib import Path
+import sys
+r=Path(sys.argv[1])
+cases=[b'',b'a',b'a\n',b'a\n\n',b'a\x00',b'a\x00\x00',b'a\x00b',b'a\x00b\n',bytes(range(256)),b'\\*?[] $()\r\n',b'x'*100000]
+for i,data in enumerate(cases): (r/('bytes-'+str(i))).write_bytes(data)
+BYTES
+  for left in "$HOSTS_TEST_ROOT"/bytes-*; do
+    for right in "$HOSTS_TEST_ROOT"/bytes-*; do
+      expected=0; actual=0
+      cmp -s "$left" "$right" || expected=$?
+      hosts_files_equal "$left" "$right" || actual=$?
+      [ "$actual" -eq "$expected" ]
+    done
+  done
+  actual=0; hosts_files_equal "$HOSTS_TEST_ROOT/missing" "$hosts" || actual=$?
+  [ "$actual" -eq 2 ]
+  ;;
  editor-policy-failure)
   set +e
   /bin/bash -euo pipefail -c '

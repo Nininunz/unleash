@@ -1,6 +1,63 @@
 # Hosts-file policy only. No PF, VPN, resolver-cache, or network operations.
+# Compare checked hexadecimal byte streams. Bash read cannot distinguish EOF
+# from an I/O error; od reports read failures and preserves NULs and final LF.
+# Missing utilities and partial reads fail closed with status 2.
+hosts_files_equal() {
+  (
+    LC_ALL=C; export LC_ALL
+    [ -f "$1" ] && [ -r "$1" ] && [ -f "$2" ] && [ -r "$2" ] || exit 2
+    left=$(od -An -v -tx1 "$1") || exit 2
+    right=$(od -An -v -tx1 "$2") || exit 2
+    [ "$left" = "$right" ]
+  )
+}
+
+# Append a sentinel only after a successful read. Holding the final record
+# distinguishes a missing final newline; pipefail also catches partial cat reads.
+hosts_preview_lines() {
+  (
+    set -o pipefail
+    { cat "$2" || exit 2; printf '\001'; } |
+      LC_ALL=C awk -v prefix="$1" '
+        NR>1 {print prefix previous}
+        {previous=$0}
+        END {
+          if(substr(previous,length(previous),1)!=sprintf("%c",1)) exit 2
+          last=substr(previous,1,length(previous)-1)
+          if(length(last)) {
+            print prefix last
+            print "\\ No newline at end of file"
+          }
+        }
+      '
+  )
+}
+
+# Recovery may lack diff. Display a complete replacement hunk in that case.
+hosts_preview_diff() {
+  if command -v diff >/dev/null 2>&1; then
+    diff -u -L current-hosts -L proposed-hosts "$1" "$2"
+    return $?
+  fi
+  local result=0 old_count new_count old_start=1 new_start=1 prefix file
+  hosts_files_equal "$1" "$2" || result=$?
+  [ "$result" -ne 0 ] || return 0
+  [ "$result" -eq 1 ] || return 2
+  old_count=$(awk 'END {print NR+0}' "$1") || return 2
+  new_count=$(awk 'END {print NR+0}' "$2") || return 2
+  [ "$old_count" -ne 0 ] || old_start=0
+  [ "$new_count" -ne 0 ] || new_start=0
+  printf '%s\n' '--- current-hosts' '+++ proposed-hosts'
+  printf '@@ -%s,%s +%s,%s @@\n' "$old_start" "$old_count" "$new_start" "$new_count"
+  for prefix in - +; do
+    if [ "$prefix" = - ]; then file="$1"; else file="$2"; fi
+    hosts_preview_lines "$prefix" "$file" || return 2
+  done
+  return 1
+}
+
 hosts_same_file() {
-  [ ! -L "$2" ] && cmp -s "$1" "$2" && [ "$(stat -f '%u:%g:%Lp' "$1")" = "$(stat -f '%u:%g:%Lp' "$2")" ]
+  [ ! -L "$2" ] && hosts_files_equal "$1" "$2" && [ "$(stat -f '%u:%g:%Lp' "$1")" = "$(stat -f '%u:%g:%Lp' "$2")" ]
 }
 
 hosts_resolve() {
@@ -95,7 +152,7 @@ hosts_preview() {
     fi
     printf 'Hosts entries only; PF/VPN unchanged. Off removes owned mappings only; it is not a network allow rule.\n'
     hosts_preview_rc=0
-    diff -u -L current-hosts -L proposed-hosts "$hosts_preview_original" "$hosts_preview_tmp/candidate" || hosts_preview_rc=$?
+    hosts_preview_diff "$hosts_preview_original" "$hosts_preview_tmp/candidate" || hosts_preview_rc=$?
     [ "$hosts_preview_rc" -le 1 ]
   )
 }
@@ -261,7 +318,7 @@ hosts_policy_matches() {
     trap 'rm -rf "$hosts_match_tmp"' EXIT
     [ -f "$1/private/etc/hosts" ] || exit 1
     hosts_candidate "$1/private/etc/hosts" "$1/private/etc/unleash-hosts.conf" "$hosts_match_tmp/candidate" "$hosts_match_tmp/rows" || exit 1
-    cmp -s "$1/private/etc/hosts" "$hosts_match_tmp/candidate"
+    hosts_files_equal "$1/private/etc/hosts" "$hosts_match_tmp/candidate"
   )
 }
 

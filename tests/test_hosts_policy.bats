@@ -199,3 +199,23 @@ PY
 @test "editor policy generation failure aborts before input without writes" {
   check_case editor-policy-failure
 }
+
+@test "exact comparison preserves NULs final newlines and arbitrary bytes" {
+  check_case exact-comparison
+}
+
+@test "Recovery preview apply matching and rollback run without cmp or diff" {
+  check_case recovery-utilities
+}
+
+@test "Recovery preview rejects an input disappearing after line counting" {
+  check_case preview-disappeared-input
+}
+
+@test "Recovery partial read aborts editor before APPLY confirmation or writes" {
+  check_case preview-partial-read
+}
+
+@test "comparison rejects empty and partial read failures on either input" {
+  check_case comparison-read-failure
+}
