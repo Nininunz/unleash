@@ -379,6 +379,21 @@ find_available_uid() {
 	echo 501
 }
 
+hide_user() {
+	local node="$1"
+	local data_mount="$2"
+	local username="$3"
+
+	info "Hiding user account: $username"
+
+	check_user_exists "$node" "$username" || error_exit "Could not find user '$username'"
+
+	dscl -f "$node" localhost -create "/Local/Default/Users/$username" IsHidden "1" 2>/dev/null
+
+	chflags hidden "$data_mount/Users/$username"
+	success "User '$username' hidden"
+}
+
 delete_user() {
 	local node="$1"
 	local data_mount="$2"
@@ -421,21 +436,6 @@ create_admin_user() {
 	mkdir -p "$user_home" || error_exit "Failed to create home directory"
 	chown "$uid:20" "$user_home" || error_exit "Failed to assign home ownership"
 	success "Admin '$username' created (UID $uid)"
-}
-
-hide_user() {
-	local node="$1"
-	local data_mount="$2"
-	local username="$3"
-
-	info "Hiding user account: $username"
-
-	check_user_exists "$node" "$username" || error_exit "Could not find user '$username'"
-
-	dscl -f "$node" localhost -create "/Local/Default/Users/$username" IsHidden "1" 2>/dev/null
-
-	chflags hidden "$data_mount/Users/$username"
-	success "User '$username' hidden"
 }
 
 add_to_filevault() {
@@ -1662,6 +1662,223 @@ check_upgrade_safety() {
   fi
 }
 
+# probe.sh — read-only fingerprint of macOS version + MDM enrollment mechanism.
+# Produces a version-aware compatibility verdict so other commands can adapt to
+# what Apple changes between releases. This module never writes to any volume.
+
+PB="${PB:-/usr/libexec/PlistBuddy}"
+
+# Codename per macOS major. Data lives here so the command and its tests share
+# one source of truth; extend it as Apple ships new majors.
+probe_codename() {
+	case "${1:-}" in
+		15) echo "Sequoia" ;;
+		26) echo "Tahoe" ;;
+		*)  echo "unknown" ;;
+	esac
+}
+
+# Compatibility verdict per macOS major:
+#   supported = confirmed on real hardware
+#   testing   = validation in progress on this major
+#   untested  = no confirmed run yet
+probe_compat() {
+	case "${1:-}" in
+		15) echo "supported" ;;
+		26) echo "testing" ;;
+		*)  echo "untested" ;;
+	esac
+}
+
+_systemversion_plist() {
+	echo "${1%/}/System/Library/CoreServices/SystemVersion.plist"
+}
+
+# probe_macos_version <volume_root> -> "<product>|<build>" on stdout.
+# Reads the target volume's plist (the only version source in Recovery, where
+# sw_vers reports the Recovery OS, not the installed one). Non-zero if absent.
+probe_macos_version() {
+	local root="${1:-/}" plist product build
+	plist="$(_systemversion_plist "$root")"
+	[ -f "$plist" ] || return 1
+	product="$($PB -c "Print :ProductVersion" "$plist" 2>/dev/null)" || return 1
+	[ -n "$product" ] || return 1
+	build="$($PB -c "Print :ProductBuildVersion" "$plist" 2>/dev/null || true)"
+	echo "${product}|${build}"
+}
+
+# probe_macos_major <version> -> integer major (26 from 26.1.2). Non-zero if the
+# leading field is not numeric.
+probe_macos_major() {
+	local major="${1:-}"
+	major="${major%%.*}"
+	case "$major" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	echo "$major"
+}
+
+# probe_enrollment <volume_root> -> dep | profiles | none (read-only).
+# Inspects marker files only; changes nothing.
+probe_enrollment() {
+	local root="${1:-/}"
+	root="${root%/}"
+	local settings="$root/private/var/db/ConfigurationProfiles/Settings"
+	if [ -f "$settings/.cloudConfigRecordFound" ] \
+		|| [ -f "$settings/.cloudConfigHasActivationRecord" ]; then
+		echo "dep"
+		return 0
+	fi
+	local store="$root/private/var/db/ConfigurationProfiles/Store"
+	if [ -d "$store" ] && [ -n "$(ls -A "$store" 2>/dev/null)" ]; then
+		echo "profiles"
+		return 0
+	fi
+	echo "none"
+}
+
+# probe_dep_detail <volume_root> -> "<org>|<mdm_host>" (either field may be
+# empty). Read-only parse of the cached DEP activation record. Mirrors the
+# extraction in suppress.sh; kept local to avoid refactoring that module here.
+probe_dep_detail() {
+	local root="${1:-/}"
+	root="${root%/}"
+	local rec="$root/private/var/db/ConfigurationProfiles/Settings/.cloudConfigRecordFound"
+	[ -f "$rec" ] || { echo "|"; return 1; }
+	local org mdm_host
+	org=$(plutil -convert xml1 -o - "$rec" 2>/dev/null \
+		| grep -iA1 OrganizationName | tail -1 | sed -E 's/.*<string>(.*)<\/string>.*/\1/' || true)
+	mdm_host=$(plutil -convert xml1 -o - "$rec" 2>/dev/null \
+		| grep -ioE 'https?://[a-z0-9._-]+' | sed -E 's#https?://##' \
+		| sort -u | grep -viE '(^|\.)apple\.com$' | head -1 || true)
+	echo "${org}|${mdm_host}"
+}
+
+# probe_suppressed <volume_root> -> 0 when unleash bypass markers are already in
+# place. Read-only.
+probe_suppressed() {
+	local root="${1:-/}"
+	root="${root%/}"
+	[ -f "$root/private/var/db/ConfigurationProfiles/Settings/.cloudConfigRecordNotFound" ]
+}
+
+# cmd_probe [--json] [volume_root] — report version + enrollment + verdict.
+# Defaults to "/" (running system); pass a mounted volume in Recovery.
+cmd_probe() {
+	local json=false root="/" arg
+	for arg in "$@"; do
+		case "$arg" in
+			--json) json=true ;;
+			'') : ;;
+			*) root="$arg" ;;
+		esac
+	done
+
+	local ver product="unknown" build="" major="" codename compat enroll
+	if ver="$(probe_macos_version "$root")"; then
+		product="${ver%%|*}"
+		build="${ver#*|}"
+		major="$(probe_macos_major "$product" || true)"
+	fi
+	codename="$(probe_codename "$major")"
+	compat="$(probe_compat "$major")"
+	enroll="$(probe_enrollment "$root")"
+
+	local org="" mdm_host="" detail suppressed="no"
+	if [ "$enroll" = dep ]; then
+		detail="$(probe_dep_detail "$root" || true)"
+		org="${detail%%|*}"
+		mdm_host="${detail#*|}"
+	fi
+	if probe_suppressed "$root"; then suppressed="yes"; fi
+
+	if [ "$json" = true ]; then
+		printf '{"macos_version":"%s","macos_build":"%s","macos_major":"%s","codename":"%s","enrollment":"%s","org":"%s","mdm_host":"%s","suppressed":"%s","compat":"%s"}\n' \
+			"$product" "$build" "$major" "$codename" "$enroll" "$org" "$mdm_host" "$suppressed" "$compat"
+		return 0
+	fi
+
+	header "macOS / MDM Probe"
+
+	step "macOS version"
+	info "  Version : $product${build:+ (build $build)}"
+	info "  Major   : ${major:-unknown} ($codename)"
+
+	step "Enrollment mechanism"
+	case "$enroll" in
+		dep)      warn "  DEP activation record present (device is org-assigned)"
+		          [ -n "$org" ] && info "  Assigned to : $org"
+		          [ -n "$mdm_host" ] && info "  Org MDM host: $mdm_host" ;;
+		profiles) warn "  Configuration profiles present" ;;
+		*)        success "  No DEP record or profiles detected" ;;
+	esac
+
+	step "Suppression state"
+	if [ "$suppressed" = yes ]; then
+		success "  unleash bypass markers present (already suppressed)"
+	else
+		info "  No unleash bypass markers (enrollment untouched)"
+	fi
+
+	step "Compatibility"
+	case "$compat" in
+		supported) success "  $codename ($major) — verified on real hardware" ;;
+		testing)   warn "  $codename ($major) — validation in progress; run on real hardware and report results" ;;
+		*)         warn "  macOS major '${major:-unknown}' — untested; proceed with caution" ;;
+	esac
+}
+
+# True only when a confirmation prompt makes sense: not a dry run and stdin is a
+# terminal. Split out so tests can force the interactive path.
+_probe_interactive() {
+	[ "${DRY_RUN:-false}" != true ] && [ -t 0 ]
+}
+
+# probe_gate <data_mount> — version-aware guard for destructive commands.
+# Resolves the System volume (for the macOS version) from the given Data mount,
+# reports the compatibility verdict, and asks to confirm before continuing on an
+# unverified version. Returns non-zero only when the user declines. Read-only.
+probe_gate() {
+	local mount="${1:-/}" sysroot sysvol="" ver product="" major="" codename verdict
+	sysroot="$mount"
+	if command -v detect_system_volume >/dev/null 2>&1; then
+		sysvol="$(detect_system_volume "$mount" 2>/dev/null || true)"
+		[ -n "$sysvol" ] && [ -d "/Volumes/$sysvol/System" ] && sysroot="/Volumes/$sysvol"
+	fi
+
+	if ver="$(probe_macos_version "$sysroot")"; then
+		product="${ver%%|*}"
+		major="$(probe_macos_major "$product" || true)"
+	else
+		product="unknown"
+	fi
+	codename="$(probe_codename "$major")"
+	verdict="$(probe_compat "$major")"
+
+	case "$verdict" in
+		supported)
+			success "macOS $major ($codename) — supported by unleash"
+			return 0
+			;;
+		testing)
+			warn "macOS $major ($codename) — compatibility under validation"
+			;;
+		*)
+			warn "macOS $product — untested by unleash; behavior unverified"
+			;;
+	esac
+
+	if ! _probe_interactive; then
+		info "Proceeding without confirmation (dry run or non-interactive)."
+		return 0
+	fi
+	if confirm "Proceed on this macOS version anyway?"; then
+		return 0
+	fi
+	warn "Aborted: macOS version not confirmed."
+	return 1
+}
+
 install_monitor_launchdaemon() {
   local data_mount="$1"
   local root=""
@@ -2839,11 +3056,421 @@ vpn_kill_status() {
 }
 
 
+cmd_init() {
+  header "unleash init — Setup Wizard"
+
+  echo "This will walk you through setting up unleash for your Mac."
+  echo "Press Ctrl+C at any time to abort."
+  echo ""
+
+  local root_ok=false
+  if is_root; then
+    root_ok=true
+  else
+    warn "Not running as root. Some checks will be limited."
+    echo ""
+  fi
+
+  step "Checking macOS version..."
+  local osver
+  osver=$(sw_vers -productVersion 2>/dev/null || echo "unknown")
+  info "macOS $osver"
+
+  step "Checking architecture..."
+  local arch
+  arch=$(uname -m 2>/dev/null || echo "unknown")
+  info "$arch"
+
+  step "Checking Recovery mode..."
+  if is_recovery; then
+    echo -e "${GRN}✓ Recovery mode${NC}"
+  else
+    echo -e "${YEL}⚠ Not in Recovery${NC}"
+    echo "  Some commands (bypass, suppress) require Recovery."
+  fi
+
+  echo ""
+
+  detect_migration_assistant
+  echo ""
+
+  detect_configurator_enrollment
+  echo ""
+
+  echo -n "Enable pf firewall (blocks MDM at kernel level)? [y/N] "
+  read -r ans
+  if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
+    if $root_ok; then
+      install_pf_mdm_block ""
+    else
+      info "Skipping firewall (needs root). Run: sudo ./unleash firewall"
+    fi
+  fi
+
+  echo ""
+  echo -n "Enable MDM monitor (checks every 5 min)? [y/N] "
+  read -r ans
+  if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
+    if $root_ok; then
+      install_monitor_launchdaemon ""
+    else
+      info "Skipping monitor (needs root). Run: sudo ./unleash monitor-install"
+    fi
+  fi
+
+  echo ""
+  echo -n "Enable persistent auto-heal (on every boot)? [y/N] "
+  read -r ans
+  if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
+    if $root_ok && ! is_recovery; then
+      install_persist_launchdaemon ""
+    elif is_recovery; then
+      echo -e "${YEL}Run after reboot: sudo ./unleash persist${NC}"
+    else
+      info "Skipping persist (needs root). Run: sudo ./unleash persist"
+    fi
+  fi
+
+  echo ""
+  echo -n "Back up current system state? [y/N] "
+  read -r ans
+  if [ "$ans" = "y" ] || [ "$ans" = "Y" ]; then
+    local dm
+    dm=$(resolve_data_volume 2>/dev/null || echo "/")
+    backup_state "$dm"
+  fi
+
+  echo ""
+  success "Setup complete!"
+  info "Recommended next steps:"
+  info "  - From Recovery: ./unleash bypass  (full bypass)"
+  info "  - From Recovery: ./unleash check  (pre-format check)"
+  info "  - After login:   sudo ./unleash harden"
+}
+
+
+cmd_suggest() {
+  header "unleash suggest — Risk-Based Recommendations"
+
+  local score=0
+  local recommendations=""
+
+  step "Analyzing system state..."
+
+  if is_recovery; then
+    info "System is in Recovery mode"
+    recommendations="$recommendations\n  - Run 'bypass' to create admin user + suppress MDM"
+    recommendations="$recommendations\n  - Run 'suppress' to silence enrollment (no user)"
+    recommendations="$recommendations\n  - Run 'check' for pre-format safety report"
+  else
+    info "System is booted normally"
+    recommendations="$recommendations\n  - Run 'sudo ./unleash heal' to check MDM state"
+    recommendations="$recommendations\n  - Run 'sudo ./unleash audit' for deep scan"
+  fi
+
+  local cfg_dir="/private/var/db/ConfigurationProfiles/Settings"
+  if [ -d "$cfg_dir" ]; then
+    if [ -f "$cfg_dir/.cloudConfigRecordFound" ]; then
+      echo -e "${YEL}⚠ DEP record still present${NC}"
+      score=$((score + 10))
+      recommendations="$recommendations\n  - Run 'suppress' to clear DEP markers"
+    fi
+  fi
+
+  local hosts="/etc/hosts"
+  if [ -f "$hosts" ] && grep -q "mdmenrollment.apple.com" "$hosts" 2>/dev/null; then
+    echo -e "${GRN}✓ MDM domains blocked${NC}"
+  else
+    echo -e "${YEL}⚠ MDM domains not blocked${NC}"
+    score=$((score + 5))
+    recommendations="$recommendations\n  - Run 'sudo ./unleash firewall' for pf-level block"
+  fi
+
+  if command -v pfctl &>/dev/null; then
+    if pfctl -a "com.unleash/mdm" -s rules 2>/dev/null | grep -q "block"; then
+      echo -e "${GRN}✓ pf firewall active${NC}"
+    fi
+  fi
+
+  detect_migration_assistant
+  local ma_result=$?
+  if [ "$ma_result" -ne 0 ]; then
+    score=$((score + 8))
+    recommendations="$recommendations\n  - Run 'sudo ./unleash harden' to clean user artifacts"
+  fi
+
+  detect_configurator_enrollment
+  local cfg_result=$?
+  if [ "$cfg_result" -ne 0 ]; then
+    score=$((score + 15))
+    recommendations="$recommendations\n  - Run 'bypass' from Recovery to clear ASM enrollment"
+  fi
+
+  echo ""
+  info "Risk Score: $score"
+  if [ "$score" -eq 0 ]; then
+    echo -e "${GRN}✓ System is clean${NC}"
+  elif [ "$score" -lt 10 ]; then
+    echo -e "${YEL}⚠ Low risk${NC}"
+  elif [ "$score" -lt 20 ]; then
+    echo -e "${YEL}⚠ Medium risk${NC}"
+  else
+    echo -e "${RED}✗ High risk${NC}"
+  fi
+
+  echo ""
+  info "Recommendations:"
+  echo -e "$recommendations" | sed '/^$/d'
+}
+
+
+
+known_orgs() {
+  cat << 'ORGS'
+# Known MDM org identifiers and their remediation quirks
+# Format: org_id:description:extra_block_domains
+apple:Apple Internal:apple.com
+jamf:JAMF Pro Managed:jamfcloud.com
+mosyle:Mobile Device Management:mosyle.com
+addigy:Remote Management:addigy.com
+kandji:Device Management:kandji.io
+vmware:Workspace ONE:air-watch.com
+ORGS
+}
+
+cmd_remediate() {
+  header "unleash remediate — Per-Org MDM Cleanup"
+
+  local org="${1:-auto}"
+
+  if [ "$org" = "auto" ] || [ "$org" = "" ]; then
+    step "Detecting MDM organization..."
+    local detected=""
+    if [ -f "/Library/Profiles" ]; then
+      detected=$(plutil -p "/Library/Profiles" 2>/dev/null | grep -iE "jamf|mosyle|addigy|kandji|vmware" | head -1 || true)
+    fi
+    if command -v profiles &>/dev/null; then
+      local profile_info
+      profile_info=$(sudo profiles -P 2>/dev/null || true)
+      for org_line in $(known_orgs | grep -v "^#"); do
+        local org_id
+        local org_desc
+        org_id=$(echo "$org_line" | cut -d: -f1)
+        org_desc=$(echo "$org_line" | cut -d: -f2)
+        if echo "$profile_info" | grep -qi "$org_desc"; then
+          detected="$org_id"
+          info "Detected: $org_desc"
+          break
+        fi
+      done
+    fi
+    if [ -z "$detected" ]; then
+      detected="generic"
+      info "No specific org detected, using generic cleanup"
+    fi
+    org="$detected"
+  fi
+
+  step "Applying $org-specific remediation..."
+
+  local extra_domains=""
+  extra_domains=$(known_orgs | grep "^$org:" | cut -d: -f3 || true)
+
+  local hosts_file="/etc/hosts"
+  if [ -n "$extra_domains" ] && [ -f "$hosts_file" ]; then
+    for domain in $(echo "$extra_domains" | tr ',' ' '); do
+      if ! grep -q "$domain" "$hosts_file" 2>/dev/null; then
+        echo "0.0.0.0 $domain" >> "$hosts_file"
+        info "Blocked: $domain"
+      fi
+    done
+  fi
+
+  info "Running harden..."
+  harden_live_os
+
+  info "Running heal..."
+  heal_suppress ""
+
+  success "Remediation complete for $org"
+  info "If MDM returns, open an issue with the org name."
+}
+
+
+TELEMETRY_FILE="$HOME/.unleash-telemetry"
+
+telemetry_opt_in() {
+  local val="${1:-}"
+  if [ "$val" = "yes" ] || [ "$val" = "true" ] || [ "$val" = "1" ]; then
+    echo "enabled" > "$TELEMETRY_FILE"
+    success "Telemetry enabled"
+  elif [ "$val" = "no" ] || [ "$val" = "false" ] || [ "$val" = "0" ]; then
+    rm -f "$TELEMETRY_FILE"
+    success "Telemetry disabled"
+  else
+    local current="disabled"
+    [ -f "$TELEMETRY_FILE" ] && current="enabled"
+    info "Telemetry: $current"
+    info "Usage: sudo ./unleash telemetry on|off"
+  fi
+}
+
+telemetry_is_enabled() {
+  [ -f "$TELEMETRY_FILE" ] && return 0
+  return 1
+}
+
+telemetry_send() {
+  telemetry_is_enabled || return 0
+  local event="$1"
+  local data="${2:-{}}"
+  local url="https://unleash-telemetry.mateussiqueira.workers.dev/event"
+  local payload
+  payload=$(printf '{"event":"%s","version":"%s","arch":"%s","os":"%s","data":%s}' \
+    "$event" "$VERSION" "$(uname -m)" "$(uname -s)" "$data")
+  curl -s -o /dev/null -w "" -H "Content-Type: application/json" \
+    -d "$payload" "$url" 2>/dev/null || true
+}
+
+
+cmd_predict() {
+  header "unleash predict — Serial Number Lookup"
+
+  local serial=""
+  serial=$(ioreg -rd1 -c IOPlatformExpertDevice 2>/dev/null | grep -i "IOPlatformSerialNumber" | awk -F'"' '{print $4}' || echo "")
+
+  if [ -z "$serial" ]; then
+    serial="${1:-}"
+  fi
+  if [ -z "$serial" ]; then
+    read -r -p "Enter serial number (or press Enter to skip): " serial
+  fi
+  if [ -z "$serial" ]; then
+    info "No serial provided. Run: ./unleash predict <serial>"
+    return 0
+  fi
+
+  step "Looking up: $serial"
+
+  local serial_prefix
+  serial_prefix=$(echo "$serial" | head -c 4)
+
+  info "Serial prefix: $serial_prefix"
+
+  local known_orgs
+  known_orgs=$(cat << 'ORGS'
+F5G:Apple Internal
+C0D:JAMF Managed
+C7G:JAMF Managed
+FVF:JAMF Managed
+H4C:School District Managed
+VMW:VMware Workspace ONE
+M5K:Addigy Managed
+W4P:Kandji Managed
+ORGS
+  )
+
+  local match
+  match=$(echo "$known_orgs" | grep "^$serial_prefix:" || true)
+
+  if [ -n "$match" ]; then
+    local org_name
+    org_name=$(echo "$match" | cut -d: -f2)
+    echo -e "${YEL}⚠ Predicted enrollment: $org_name${NC}"
+    info "This serial prefix is commonly associated with $org_name-managed devices."
+    info "Remediation: sudo ./unleash remediate"
+  else
+    info "No known association for this serial prefix."
+    info "The device may be from a smaller org or not organizationally enrolled."
+  fi
+
+  info "For definitive ownership: https://checkcoverage.apple.com"
+}
+
+
+DISCORD_BOT_DIR="/tmp/unleash-discord"
+DISCORD_BOT_SCRIPT="${DISCORD_BOT_DIR}/bot.sh"
+DISCORD_BOT_PID="${DISCORD_BOT_DIR}/bot.pid"
+
+cmd_discord_bot_install() {
+  header "Install Discord Bot"
+
+  local token="${1:-}"
+  local channel_id="${2:-}"
+  if [ -z "$token" ]; then
+    read -r -p "Discord Bot Token: " token
+  fi
+  if [ -z "$channel_id" ]; then
+    read -r -p "Discord Channel ID: " channel_id
+  fi
+  if [ -z "$token" ] || [ -z "$channel_id" ]; then
+    error_exit "Token and channel ID are required"
+  fi
+
+  mkdir -p "$DISCORD_BOT_DIR"
+
+  cat > "$DISCORD_BOT_SCRIPT" <<- BOT
+#!/bin/bash
+# Unleash Discord Bot — monitors MDM and sends alerts
+TOKEN="$token"
+CHANNEL_ID="$channel_id"
+LAST_STATE=""
+while true; do
+  STATE="clean"
+  if [ -f "/private/var/db/ConfigurationProfiles/Settings/.cloudConfigRecordFound" ]; then
+    STATE="dirty"
+  fi
+  if [ "\$STATE" != "\$LAST_STATE" ] && [ "\$STATE" = "dirty" ]; then
+    curl -s -X POST "https://discord.com/api/v10/channels/\$CHANNEL_ID/messages" \
+      -H "Authorization: Bot \$TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"content":"🚨 **Unleash Alert** — MDM enrollment detected on '"$(hostname)"'"}'
+  fi
+  LAST_STATE="\$STATE"
+  sleep 300
+done
+BOT
+  chmod +x "$DISCORD_BOT_SCRIPT"
+
+  nohup bash "$DISCORD_BOT_SCRIPT" > /dev/null 2>&1 &
+  local pid=$!
+  echo "$pid" > "$DISCORD_BOT_PID"
+  success "Discord bot started (PID $pid)"
+  info "To stop: ./unleash discord-bot-stop"
+}
+
+cmd_discord_bot_stop() {
+  if [ -f "$DISCORD_BOT_PID" ]; then
+    local pid
+    pid=$(cat "$DISCORD_BOT_PID")
+    kill "$pid" 2>/dev/null || true
+    rm -f "$DISCORD_BOT_PID"
+    success "Discord bot stopped"
+  else
+    info "Discord bot not running"
+  fi
+}
+
+cmd_discord_bot_status() {
+  if [ -f "$DISCORD_BOT_PID" ]; then
+    local pid
+    pid=$(cat "$DISCORD_BOT_PID")
+    if kill -0 "$pid" 2>/dev/null; then
+      echo -e "${GRN}Discord bot running (PID $pid)${NC}"
+    else
+      echo -e "${YEL}Discord bot not running (stale PID)${NC}"
+    fi
+  else
+    echo -e "${YEL}Discord bot not installed${NC}"
+  fi
+}
+
+
 show_cmd_help() {
 	case "$1" in
 		bypass)     echo "Bypass MDM from Recovery. Creates admin user." ;;
 		suppress)   echo "Suppress enrollment without creating a user." ;;
-    admin)      echo "Create an admin user without suppressing enrollment." ;;
+		admin)      echo "Create an admin user without suppressing enrollment." ;;
 		heal)       echo "Re-apply suppression after macOS updates." ;;
 		persist)    echo "Install auto-heal LaunchDaemon." ;;
 		unpersist)  echo "Remove auto-heal LaunchDaemon." ;;
@@ -2857,6 +3484,7 @@ show_cmd_help() {
 		dualboot)   echo "Target an external macOS install." ;;
 		status)     echo "Show MDM enrollment status (Recovery only)." ;;
 		check)      echo "Pre-format / pre-upgrade safety report." ;;
+		probe)      echo "Fingerprint macOS version + enrollment; read-only." ;;
 		history)    echo "Show event log from monitor/heal runs." ;;
 		history-clear) echo "Clear event log." ;;
 		monitor)    echo "Start background MDM monitor (5 min interval)." ;;
@@ -2899,7 +3527,7 @@ Bypass / suppress / monitor MDM enrollment on macOS.
   Core:
     bypass          Full MDM bypass from Recovery (creates admin user)
     suppress        Silence enrollment, no user created
-    admin           Create a local admin user without suppressing enrollment
+    admin           Create an admin user without suppressing enrollment
     heal            Check + re-apply suppression after macOS updates
 
   Persistence:
@@ -2936,6 +3564,7 @@ Bypass / suppress / monitor MDM enrollment on macOS.
     predict         Look up serial number enrollment
     telemetry       Manage anonymous usage stats (opt-in)
   Diagnostics:
+    probe           Fingerprint macOS version + MDM mechanism (read-only)
     doctor          Run pre-flight checks on this environment
     report          Generate a full markdown status report
     history         Show event log from monitor/heal runs
@@ -3006,6 +3635,7 @@ cmd_bypass() {
 		header "Full MDM Bypass"
 		local data_mount
 		data_mount=$(resolve_data_volume)
+		probe_gate "$data_mount" || return 1
 		full_bypass_mode "$data_mount"
 	else
 		error_exit "Full bypass must run from Recovery mode."
@@ -3020,7 +3650,15 @@ cmd_suppress() {
 	header "Suppress Enrollment"
 	local data_mount
 	data_mount=$(resolve_data_volume)
+	probe_gate "$data_mount" || return 1
 	suppress_only_mode "$data_mount"
+}
+
+cmd_backup() {
+	header "Backup"
+	local data_mount
+	data_mount=$(resolve_data_volume)
+	backup_state "$data_mount"
 }
 
 cmd_admin() {
@@ -3035,13 +3673,6 @@ cmd_admin() {
 	local data_mount
 	data_mount=$(resolve_data_volume)
 	admin_only_mode "$data_mount"
-}
-
-cmd_backup() {
-	header "Backup"
-	local data_mount
-	data_mount=$(resolve_data_volume)
-	backup_state "$data_mount"
 }
 
 cmd_restore() {
@@ -3280,7 +3911,7 @@ cmd_interactive_recovery() {
 	local options=(
 		"Full bypass (create admin + suppress MDM)"
 		"Suppress enrollment only"
-    "Create local admin user only"
+		"Create local admin user only"
 		"Auto-heal"
 		"Install pf firewall"
 		"Remove pf firewall"
@@ -3303,9 +3934,9 @@ cmd_interactive_recovery() {
 			"Suppress enrollment only")
 				suppress_only_mode "$data_mount"
 				;;
-      "Create local admin user only")
-        admin_only_mode "$data_mount"
-        ;;
+			"Create local admin user only")
+				admin_only_mode "$data_mount"
+				;;
 			"Auto-heal")
 				heal_suppress "$data_mount"
 				;;
@@ -3423,7 +4054,7 @@ main() {
 	case "${1:-}" in
 		bypass|by)       cmd_bypass ;;
 		suppress|sv)     cmd_suppress ;;
-    admin|adm)        cmd_admin ;;
+		admin|adm)	      cmd_admin ;;
 		heal)             cmd_heal ;;
 		persist)          cmd_persist ;;
 		unpersist)        cmd_unpersist ;;
@@ -3437,6 +4068,7 @@ main() {
 		dualboot)         cmd_dualboot ;;
 		status|st|ls)     cmd_status ;;
 		check)            cmd_check ;;
+		probe)            cmd_probe "${2:-}" "${3:-}" ;;
 		history)          cmd_history ;;
 		history-clear)    cmd_history_clear ;;
 		test|dry-run)     cmd_test "$@" ;;

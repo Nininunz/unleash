@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- The standalone builder follows the entrypoint's module list so regenerated
+  scripts include all required modules.
+
 ## [2.0.0] — 2026-06-20
 
 ### Added
