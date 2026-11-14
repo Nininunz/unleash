@@ -17,31 +17,31 @@ validate_password() {
 }
 
 prompt_username() {
-	local var_name="$1"
-	local value
+	prompt_destination_valid "$1" || return 1
+	local __unleash_prompt_value __unleash_prompt_msg
 	while true; do
-		read -r -p "Username (default 'Apple'): " value
-		value="${value:=Apple}"
-		if msg=$(validate_username "$value"); then
-			eval "$var_name=\"$value\""
+		IFS= read -r -p "Username (default 'Apple'): " __unleash_prompt_value || return 1
+		__unleash_prompt_value="${__unleash_prompt_value:-Apple}"
+		if __unleash_prompt_msg=$(validate_username "$__unleash_prompt_value"); then
+			printf -v "$1" '%s' "$__unleash_prompt_value" || return 1
 			return 0
 		else
-			warn "$msg"
+			warn "$__unleash_prompt_msg"
 		fi
 	done
 }
 
 prompt_password() {
-	local var_name="$1"
-	local value
+	prompt_destination_valid "$1" || return 1
+	local __unleash_prompt_value __unleash_prompt_msg
 	while true; do
-		read -r -p "Password (default '1234'): " value
-		value="${value:=1234}"
-		if msg=$(validate_password "$value"); then
-			eval "$var_name=\"$value\""
+		IFS= read -r -p "Password (default '1234'): " __unleash_prompt_value || return 1
+		__unleash_prompt_value="${__unleash_prompt_value:-1234}"
+		if __unleash_prompt_msg=$(validate_password "$__unleash_prompt_value"); then
+			printf -v "$1" '%s' "$__unleash_prompt_value" || return 1
 			return 0
 		else
-			warn "$msg"
+			warn "$__unleash_prompt_msg"
 		fi
 	done
 }
