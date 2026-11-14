@@ -316,31 +316,52 @@ resolve_target_volumes() {
 	echo "$sys_path|$data_path"
 }
 
+# These are unleash input policies, not a complete macOS account specification.
+# Diagnostics go to stdout for prompt capture; warn renders them on stderr.
+# Adapted from https://github.com/ejams1/unleash/commit/f2a6642
+account_has_control_chars() {
+	local LC_ALL=C
+	[[ "$1" == *[[:cntrl:]]* ]]
+}
+
+validate_fullname() {
+	[[ "$1" == *[![:space:]]* ]] \
+		|| { printf '%s\n' 'Full name must contain a non-whitespace character'; return 1; }
+	account_has_control_chars "$1" \
+		&& { printf '%s\n' 'Full name cannot contain control characters'; return 1; }
+	return 0
+}
 
 validate_username() {
 	local u="$1"
-	[ -z "$u" ] && { echo "Username cannot be empty" >&2; return 1; }
-	[ ${#u} -gt 31 ] && { echo "Username too long (max 31 chars)" >&2; return 1; }
+	local LC_ALL=C
+	[ -z "$u" ] && { echo "Username cannot be empty"; return 1; }
+	[ ${#u} -gt 31 ] && { echo "Username too long (max 31 chars)"; return 1; }
 	[[ "$u" =~ ^[a-zA-Z0-9_-]+$ ]] \
-		|| { echo "Use only letters, numbers, underscore, hyphen" >&2; return 1; }
+		|| { echo "Use only ASCII letters, numbers, underscore, hyphen"; return 1; }
 	[[ "$u" =~ ^[a-zA-Z_] ]] \
-		|| { echo "Must start with a letter or underscore" >&2; return 1; }
+		|| { echo "Must start with a letter or underscore"; return 1; }
 	return 0
 }
 
 validate_password() {
-	[ -z "$1" ] && { echo "Password cannot be empty" >&2; return 1; }
-	[ ${#1} -lt 4 ] && { echo "Minimum 4 characters" >&2; return 1; }
+	[ -z "$1" ] && { echo "Password cannot be empty"; return 1; }
+	[ ${#1} -lt 4 ] && { echo "Minimum 4 characters"; return 1; }
+	account_has_control_chars "$1" \
+		&& { printf '%s\n' 'Password cannot contain control characters'; return 1; }
 	return 0
 }
 
-prompt_username() {
+prompt_account_field() {
 	prompt_destination_valid "$1" || return 1
 	local __unleash_prompt_value __unleash_prompt_msg
 	while true; do
-		IFS= read -r -p "Username (default 'Apple'): " __unleash_prompt_value || return 1
-		__unleash_prompt_value="${__unleash_prompt_value:-Apple}"
-		if __unleash_prompt_msg=$(validate_username "$__unleash_prompt_value"); then
+		IFS= read -r -p "$2" __unleash_prompt_value || {
+			warn 'Account input cancelled (end of input or interrupted read).'
+			return 1
+		}
+		__unleash_prompt_value="${__unleash_prompt_value:-$3}"
+		if __unleash_prompt_msg=$("$4" "$__unleash_prompt_value"); then
 			printf -v "$1" '%s' "$__unleash_prompt_value" || return 1
 			return 0
 		else
@@ -349,19 +370,16 @@ prompt_username() {
 	done
 }
 
+prompt_fullname() {
+	prompt_account_field "$1" "Full name (default 'Apple'): " Apple validate_fullname
+}
+
+prompt_username() {
+	prompt_account_field "$1" "Username (default 'Apple'): " Apple validate_username
+}
+
 prompt_password() {
-	prompt_destination_valid "$1" || return 1
-	local __unleash_prompt_value __unleash_prompt_msg
-	while true; do
-		IFS= read -r -p "Password (default '1234'): " __unleash_prompt_value || return 1
-		__unleash_prompt_value="${__unleash_prompt_value:-1234}"
-		if __unleash_prompt_msg=$(validate_password "$__unleash_prompt_value"); then
-			printf -v "$1" '%s' "$__unleash_prompt_value" || return 1
-			return 0
-		else
-			warn "$__unleash_prompt_msg"
-		fi
-	done
+	prompt_account_field "$1" "Password (default '1234'): " 1234 validate_password
 }
 
 
@@ -417,6 +435,11 @@ create_admin_user() {
 	local realname="$4"
 	local password="$5"
 	local uid="$6"
+
+	local validation_message
+	validation_message=$(validate_username "$username") || error_exit "$validation_message"
+	validation_message=$(validate_fullname "$realname") || error_exit "$validation_message"
+	validation_message=$(validate_password "$password") || error_exit "$validation_message"
 
 	local user_home="$data_mount/Users/$username"
 	if check_user_exists "$node" "$username"; then
@@ -626,15 +649,16 @@ admin_only_mode() {
 	echo ""
 	step "Creating local admin account"
 
-	prompt_default realName "Full name" "Apple"
+	local realName
+	prompt_fullname realName || return 1
 
-	local username
+	local username recreate_user=false
 	while true; do
-		prompt_username username
+		prompt_username username || return 1
 		if check_user_exists "$node" "$username"; then
 			warn "User '$username' already exists."
 			if confirm "Delete and recreate?"; then
-				delete_user "$node" "$data_mount" "$username"
+				recreate_user=true
 				break
 			else
 				echo -e "${YEL}Choose a different username.${NC}"
@@ -645,7 +669,11 @@ admin_only_mode() {
 	done
 
 	local passw
-	prompt_password passw
+	prompt_password passw || return 1
+
+	if [ "$recreate_user" = true ]; then
+		delete_user "$node" "$data_mount" "$username"
+	fi
 
 	local uid
 	uid=$(find_available_uid "$node")
@@ -683,15 +711,15 @@ full_bypass_mode() {
 	step "Creating temporary admin account"
 
 	local realName
-	prompt_default realName "Full name" "Apple"
+	prompt_fullname realName || return 1
 
-	local username
+	local username recreate_user=false
 	while true; do
-		prompt_username username
+		prompt_username username || return 1
 		if check_user_exists "$node" "$username"; then
 			warn "User '$username' already exists."
 			if confirm "Delete and recreate?"; then
-				delete_user "$node" "$data_mount" "$username"
+				recreate_user=true
 				break
 			else
 				echo -e "${YEL}Choose a different username.${NC}"
@@ -702,7 +730,11 @@ full_bypass_mode() {
 	done
 
 	local passw
-	prompt_password passw
+	prompt_password passw || return 1
+
+	if [ "$recreate_user" = true ]; then
+		delete_user "$node" "$data_mount" "$username"
+	fi
 
 	local uid
 	uid=$(find_available_uid "$node")
@@ -3712,11 +3744,11 @@ cmd_dualboot() {
 	step "Creating admin account on target"
 
 	local realName
-	prompt_default realName "Full name" "Apple"
+	prompt_fullname realName || return 1
 	local username
-	prompt_username username
+	prompt_username username || return 1
 	local passw
-	prompt_password passw
+	prompt_password passw || return 1
 	local uid
 	uid=$(find_available_uid "$node")
 

@@ -3,6 +3,10 @@
 ## Unreleased
 
 ### Fixed
+- Account prompts show specific validation errors, enforce separate full-name,
+  username, and password policies, and stop on EOF before account creation or
+  replacement. Validation-message handling adapts
+  [ejams1's approach](https://github.com/ejams1/unleash/commit/f2a6642).
 - Demo status lines render ANSI colors correctly, and the completion header uses
   aligned borders.
 - Prompt answers are assigned literally instead of being evaluated as shell code,
