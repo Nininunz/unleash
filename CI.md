@@ -1,33 +1,42 @@
-# Local CI
+# Continuous integration
 
-GitHub Actions is configured but requires billing to be resolved on the account.
-Until then, run CI locally with one of these methods:
+GitHub Actions runs the checks in `.github/workflows/ci.yml` for pushes to
+`main`, pull requests targeting any branch, and manual workflow dispatches.
+Pull requests between stacked branches receive the same checks.
 
-## Makefile
+The macOS 15 job uses system Bash 3.2, installs ShellCheck and Bats with
+Homebrew, and runs `make ci`. Tool versions are printed in each run; Homebrew
+provides the installed ShellCheck and Bats versions.
 
-```bash
+## Local checks
+
+On macOS, install the development tools and run the shared CI command:
+
+```sh
+brew install shellcheck bats-core
 make ci
 ```
 
-Runs ShellCheck, bash syntax check, and markdown lint in sequence.
+Python 3 and Git are also required. Keep Bash 3.2 first on `PATH` when checking
+compatibility with the system shell.
 
-## act (Docker-based)
+`make ci` runs:
 
-Requires Docker Desktop running.
+- `make lint`: Bash syntax checks and ShellCheck through the shared lint script.
+- `make test`: the Bats suite with isolated macOS command fixtures.
+- `make check-build`: rebuild the standalone script and fail if it differs from
+  the tracked artifact.
 
-```bash
-act -j shellcheck -W .github/workflows/ci.yml --container-architecture linux/amd64
-act -j syntax -W .github/workflows/ci.yml --container-architecture linux/amd64
-act -j markdown -W .github/workflows/ci.yml --container-architecture linux/amd64
-```
+After changing an embedded module or the entrypoint, run `make build` and include
+the updated `unleash-standalone.sh` in the commit before running `make ci`.
+The build consistency check intentionally reports a diff until the generated
+artifact matches the committed version.
 
-Or all at once:
+Markdown lint is not part of the required checks. The previous Markdown jobs
+ignored failures and did not enforce a documentation standard.
 
-```bash
-act --container-architecture linux/amd64
-```
+## Troubleshooting
 
-## CircleCI
-
-A `.circleci/config.yml` is included. Connect the repo at https://circleci.com to
-use it as a free CI alternative (public repos get 6000 free minutes/month).
+Check the repository's Actions tab and run annotations for disabled workflows,
+runner failures, or account restrictions. There is no CircleCI fallback config;
+run `make ci` locally when hosted checks are unavailable.
