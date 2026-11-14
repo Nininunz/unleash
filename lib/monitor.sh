@@ -96,7 +96,6 @@ monitor_mdm() {
   echo "$(date) Monitor started (interval ${interval}s)" >> "$logfile"
 
   local cfg="/private/var/db/ConfigurationProfiles/Settings"
-  local hosts="/private/etc/hosts"
 
   trap 'echo "$(date) Monitor stopped" >> "$logfile"; rm -f "$pidfile"; exit 0' INT TERM
 
@@ -109,9 +108,9 @@ monitor_mdm() {
       reason="DEP record found"
     fi
 
-    if [ -f "$hosts" ] && ! grep -q "iprofiles.apple.com" "$hosts" 2>/dev/null; then
+    if ! hosts_policy_matches ""; then
       state="dirty"
-      reason="Hosts block missing"
+      reason="Owned hosts policy needs reconciliation"
     fi
 
     if command -v profiles &>/dev/null; then

@@ -8,7 +8,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT_PATH="$SCRIPT_DIR/$(basename "$0")"
 LIB_DIR="$SCRIPT_DIR/lib"
 
-for _lib in colors config detect validate dscl suppress backup status launchd heal firewall harden whitelist check probe monitor history doctor selfupdate uninstall report ma_detect demo vpn init suggest remediate telemetry predict discord; do
+for _lib in colors config detect validate dscl hosts hosts_ui suppress backup status launchd heal firewall harden whitelist check probe monitor history doctor selfupdate uninstall report ma_detect demo vpn init suggest remediate telemetry predict discord; do
 	_lib_path="$LIB_DIR/$_lib.sh"
 	if [ -f "$_lib_path" ]; then
 		source "$_lib_path"
@@ -30,6 +30,7 @@ show_cmd_help() {
 		firewall-off) echo "Remove pf MDM block." ;;
 		harden)     echo "Kill MDM processes + remove profiles + flush DNS." ;;
 		audit)      echo "Deep system scan with risk score." ;;
+		hosts) echo "Hosts-only policy: hosts {edit|preview|status|apply|save|rollback} [--root DIR] [--policy FILE] [--plain] [--backup DIR]" ;;
 		whitelist)  echo "Block only MDM domains, keep iCloud/App Store." ;;
 		backup)     echo "Save current state." ;;
 		restore)    echo "Restore from backup." ;;
@@ -77,6 +78,7 @@ Bypass / suppress / monitor MDM enrollment on macOS.
   COMMANDS
 
   Core:
+    hosts           Select, preview, and reconcile owned hosts-file entries.
     bypass          Full MDM bypass from Recovery (creates admin user)
     suppress        Silence enrollment, no user created
     admin           Create an admin user without suppressing enrollment
@@ -270,10 +272,8 @@ cmd_dualboot() {
 	create_admin_user "$node" "$data_path" "$username" "$realName" "$passw" "$uid"
 	touch "$data_path/private/var/db/.AppleSetupDone"
 
-	begin "Blocking domains"
-	local hosts_file="$data_path/private/etc/hosts"
-	[ -f "$hosts_file" ] || touch "$hosts_file"
-	printf '%s\n' "0.0.0.0 deviceenrollment.apple.com" "0.0.0.0 mdmenrollment.apple.com" "0.0.0.0 iprofiles.apple.com" >>"$hosts_file"
+	begin "Reconciling target hosts policy"
+	hosts_transaction "$data_path" "$data_path/private/etc/unleash-hosts.conf" apply || return 1
 	end_ok
 
 	begin "Resetting config profiles"
@@ -614,6 +614,7 @@ main() {
 		firewall-off|fw-off) cmd_firewall_off ;;
 		harden)           cmd_harden ;;
 		audit)            cmd_audit "${2:-}" ;;
+		hosts)           shift; cmd_hosts "$@" ;;
 		whitelist|wl)     cmd_whitelist ;;
 		backup)           cmd_backup ;;
 		restore)          cmd_restore ;;

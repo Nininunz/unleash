@@ -15,6 +15,7 @@ check_disk_space() {
 }
 
 backup_state() {
+	if [ "${DRY_RUN:-false}" = true ]; then printf '[dry-run] backup: no changes\n'; return 0; fi
 	local data_mount="$1"
 	mkdir -p "$BACKUP_DIR"
 	check_disk_space "$data_mount"
@@ -45,6 +46,7 @@ backup_state() {
 }
 
 restore_state() {
+	if [ "${DRY_RUN:-false}" = true ]; then printf '[dry-run] restore: no changes\n'; return 0; fi
 	[ -f "$BACKUP_DIR/timestamp" ] || error_exit "No backup found at $BACKUP_DIR"
 
 	local data_mount
@@ -62,8 +64,9 @@ restore_state() {
 	echo -e "${YEL}Target: $data_mount${NC}"
 
 	if [ -f "$BACKUP_DIR/hosts.backup" ]; then
-		cp "$BACKUP_DIR/hosts.backup" "$data_mount/private/etc/hosts"
-		success "hosts restored"
+		hosts_restore_owned_backup "$data_mount" "$BACKUP_DIR/hosts.backup" || return 1
+		info "Recognized owned hosts mappings restored; unrelated current entries preserved."
+		info "Raw hosts backup retained for reference; saved hosts policy now reflects restored mappings."
 	fi
 
 	if [ -d "$BACKUP_DIR/ConfigurationProfiles" ]; then
@@ -80,7 +83,6 @@ restore_state() {
 		success "launchd override restored"
 	fi
 
-	sed -i '' '/# Added by unleash/d' "$data_mount/private/etc/hosts" 2>/dev/null || true
 
 	rm -f "$BACKUP_DIR/data_volume_path" "$BACKUP_DIR/timestamp"
 	success "Restore complete"

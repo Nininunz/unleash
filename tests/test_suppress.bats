@@ -3,6 +3,7 @@
 
 setup() {
   load '../lib/colors.sh'
+  load '../lib/hosts.sh'
   load '../lib/detect.sh'
   load '../lib/suppress.sh'
   TEST_DIR="$BATS_TEST_TMPDIR/volume"
@@ -65,7 +66,7 @@ teardown() {
   [ ! -f "$TEST_DIR/Users/testuser/Library/Application Support/com.apple.ManagedClient.cache" ]
 }
 
-@test "suppress_enrollment blocks org MDM host" {
+@test "organization hosts require explicit hosts policy choices" {
   mkdir -p "$TEST_DIR/private/var/db/ConfigurationProfiles/Settings"
   cat > "$TEST_DIR/private/var/db/ConfigurationProfiles/Settings/.cloudConfigRecordFound" <<'XML'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -79,6 +80,9 @@ XML
   run plutil -convert xml1 -o - "$TEST_DIR/private/var/db/ConfigurationProfiles/Settings/.cloudConfigRecordFound"
   [ "$status" -eq 0 ]
   [[ "$output" == *"https://mdm.acme.com/enroll"* ]]
+  suppress_enrollment "$TEST_DIR"
+  ! grep -Fq '0.0.0.0 mdm.acme.com' "$TEST_DIR/private/etc/hosts"
+  printf 'version 2\noverride mdm.acme.com on\n' > "$TEST_DIR/private/etc/unleash-hosts.conf"
   suppress_enrollment "$TEST_DIR"
   grep -Fq '0.0.0.0 mdm.acme.com' "$TEST_DIR/private/etc/hosts"
 }

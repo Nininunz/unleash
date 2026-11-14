@@ -26,6 +26,7 @@ setup() {
     : > "$DEMO_SLEEP_LOG"
     run /bin/bash -eu -c '
       source "$1/lib/colors.sh"
+      source "$1/lib/hosts.sh"
       source "$1/lib/suppress.sh"
       source "$1/lib/heal.sh"
       source "$2"

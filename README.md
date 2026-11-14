@@ -53,7 +53,7 @@ Creates a temporary admin account and suppresses MDM. What it does:
 2. Unlocks FileVault if needed (asks for password)
 3. Creates an admin user (default Apple / 1234)
 4. Removes DEP activation records
-5. Blocks 13+ Apple MDM domains plus your org's MDM host
+5. Reconciles the saved hosts policy (three enrollment hosts by default)
 6. Disables 4 enrollment daemons
 7. Cleans user-level MDM artifacts from all home directories
 8. Sets .AppleSetupDone so Setup Assistant is skipped
@@ -111,6 +111,99 @@ sudo ./unleash unpersist
 ```
 
 Removes the LaunchDaemon and unloads it.
+
+### hosts — Select and preview hosts entries
+
+```bash
+./unleash hosts edit                 # arrow keys; numbered fallback
+./unleash hosts edit --plain         # numbered input
+./unleash hosts preview              # read-only diff against saved policy
+./unleash hosts status               # desired and observed owned domain counts
+```
+
+Space (or a domain number in numbered mode) toggles **On / Off**. Arrow keys
+navigate; there is no preset selector or global Off. Numbered fallback handles
+missing/failing stty, small windows, non-TTY input, and `--plain`. Colors respect
+`NO_COLOR`. Add an optional exact hostname with `c`; it starts Off. URLs,
+wildcards, IP literals and shell expressions are not accepted.
+
+The three **core hosts** are On by default:
+
+- `iprofiles.apple.com`
+- `deviceenrollment.apple.com`
+- `mdmenrollment.apple.com`
+
+Disabling a core host in the editor requires typing `OFF` for that host. Each
+explicit Off choice persists and is respected by suppression/healing. Optional
+hosts default Off and can be toggled individually. The previous eight non-core
+hosts are listed as optional choices, not recommended defaults; some affect
+activation, app licensing, or have unverified purposes. Reset defaults restores
+core On and every optional host Off while retaining added optional hostnames.
+
+On means an owned IPv4/IPv6 hosts mapping is desired. Off removes only owned
+mappings; it does not guarantee reachability or change PF/VPN or third-party
+entries. The editor labels a choice differing from defaults as a manual override.
+
+Preview compares against the actual target hosts file. Quit/EOF discards unsaved
+choices and restores terminal settings. Save choices and preview/apply are
+separate confirmed actions. Saving does not modify hosts immediately, but changes
+the policy used by subsequent suppression/healing. Live save/apply requires sudo;
+read-only preview does not. The non-secret policy is root-owned and readable
+(`0644`) so non-sudo preview, status and editing work after a privileged save.
+No DNS-cache flush, immutable flag, firewall update,
+or automatic organization-host addition occurs.
+
+Literal policy records are saved to `/private/etc/unleash-hosts.conf`:
+
+```text
+version 2
+optional mdm.example.org
+override mdm.example.org on
+# A deliberate individual core override:
+# override iprofiles.apple.com off
+```
+
+Omitting an override restores the host default. Normalize exact hosts to lowercase
+without a final dot. Duplicate overrides, malformed records, and legacy
+`preset` / Inherit/Block/Exempt files are rejected before target writes. Legacy
+files require explicit conversion to individual On/Off choices; an old global
+Off/Custom setting is never silently reinterpreted. See
+[the sample policy](examples/hosts-policy.conf).
+
+Apply a prepared policy with `sudo ./unleash hosts apply --policy FILE`, or save
+without immediate hosts changes using `sudo ./unleash hosts save --policy FILE`.
+An explicit `override CORE off` record is the manual override for noninteractive
+use. `--dry-run` previews without target writes. `--root DIR` targets an existing
+offline installation or disposable fixture instead of the running OS.
+
+Writes use a lock, staged replacement, metadata preservation, and private
+snapshots beside hosts. Recognizable legacy Unleash entries are migrated;
+unmarked mappings, ambiguous aliases/custom legacy entries, and unrelated
+content remain. Inspect the preview for restrictions that remain unowned.
+Unexpected content inside an owned section aborts rather than discarding it.
+Files are normalized to newline-terminated text. Legacy `restore` now reconciles
+only recognizable owned mappings from its raw hosts backup; it preserves current
+unowned mappings, preserves current core choices, and restores recognized optional
+mappings. A raw backup with no identifiable owned entries is refused instead of
+inferring core Off overrides. Use complete snapshot rollback for exact historical
+policy choices. The raw backup remains available for manual comparison. JSON reports expose
+`hosts_owned_domains` (unique owned hosts), replacing the old line-based
+`hosts_blocked` field.
+
+Failures attempt rollback without overwriting detected concurrent edits. Use
+`sudo ./unleash hosts rollback --backup SNAPSHOT_DIRECTORY` for an explicit
+completed snapshot (add the same `--root` for an offline target). Rollback refuses
+files whose content, owner, group, or mode changed after application, mismatched
+targets, and incomplete snapshots. Retain snapshots until satisfied; no automatic
+pruning occurs. Locks/journals left by power loss or SIGKILL require inspection.
+
+Uninstall stops the monitor, removes only owned hosts entries, and clears the
+active hosts policy in the same recoverable transaction. A private snapshot keeps
+both original files, including saved choices; explicit snapshot rollback restores
+them. Uninstall does not save synthetic core Off overrides. A fresh installation
+therefore starts with core On and optional Off. Cleanup failures/interruption
+attempt to restore the installed files rather than leave partial removal.
+
 
 ### firewall — Kernel-level MDM block
 
@@ -279,27 +372,18 @@ Unleash removes these and creates decoy files (`.cloudConfigRecordNotFound`, `.c
 
 The enrollment client contacts Apple servers to download the MDM profile. Without network access, it cannot complete enrollment.
 
-Unleash blocks via `/etc/hosts`:
+The default core-host policy maps these exact hosts to `0.0.0.0` and `::`:
 
-- `iprofiles.apple.com` — profile delivery
-- `deviceenrollment.apple.com` — DEP service
-- `mdmenrollment.apple.com` — MDM service
-- `acmdm.apple.com` — Apple Configurator MDM
-- `axm-adm-mdm.apple.com` — ACM enrollment
-- `albert.apple.com` — ABM device assignment
-- `gdmf.apple.com` — software update catalog
-- `xp.apple.com` — device management
-- `gs.apple.com` — software updates
-- `tb.apple.com` — device trust
-- `vpp.itunes.apple.com` — volume purchase
-- Your org's MDM host (extracted from the DEP record)
+- `iprofiles.apple.com`
+- `deviceenrollment.apple.com`
+- `mdmenrollment.apple.com`
 
-Both IPv4 (0.0.0.0) and IPv6 (::) entries are added.
-
-Some listed hosts also serve general Apple services. Blocking the software-update
-hosts can affect updates; this is distinct from a Wi-Fi radio failure.
-`configuration.apple.com`, used for Rosetta 2 updates, is no longer blocked.
-See [Apple's network requirements](https://support.apple.com/en-gb/101555).
+Optional hosts and individual On/Off choices are managed with `unleash hosts`.
+Update/activation endpoints and discovered organization hosts are not added
+implicitly. Hosts entries are separate from selective PF, broad PF, and VPN
+constraints; removing an owned entry does not guarantee access. Endpoint roles
+inform the policy, not a guarantee of effectiveness or service compatibility.
+See [Apple network requirements](https://support.apple.com/en-gb/101555).
 
 ### Layer 3: Launchd daemon override
 

@@ -17,10 +17,10 @@ suppress_fixture() {
   local entrypoint
   for entrypoint in unleash unleash-standalone.sh; do
     local script="$BATS_TEST_DIRNAME/../$entrypoint"
-    local target="$BATS_TEST_TMPDIR/$entrypoint" hosts
+    local target="$BATS_TEST_TMPDIR/$entrypoint" hosts backup
     hosts="$target/private/etc/hosts"
     suppress_fixture "$script" "$target"
-    printf '0.0.0.0 configuration.apple.com\n::      configuration.apple.com\n' >> "$hosts"
+    printf '# Added by unleash — DEP enrollment block\n0.0.0.0 configuration.apple.com\n::      configuration.apple.com\n' >> "$hosts"
     suppress_fixture "$script" "$target" heal_suppress
     run grep -q 'configuration[.]apple[.]com' "$hosts"
     [ "$status" -eq 1 ]
@@ -31,10 +31,10 @@ suppress_fixture() {
   local entrypoint
   for entrypoint in unleash unleash-standalone.sh; do
     local script="$BATS_TEST_DIRNAME/../$entrypoint"
-    local target="$BATS_TEST_TMPDIR/$entrypoint" hosts
+    local target="$BATS_TEST_TMPDIR/$entrypoint" hosts backup
     hosts="$target/private/etc/hosts"
     suppress_fixture "$script" "$target"
-    printf '0.0.0.0 configuration.apple.com\n::      configuration.apple.com\n' >> "$hosts"
+    printf '# Added by unleash — DEP enrollment block\n0.0.0.0 configuration.apple.com\n::      configuration.apple.com\n' >> "$hosts"
     cp "$hosts" "$target/original"
     suppress_fixture "$script" "$target" heal_suppress true
     cmp "$target/original" "$hosts"
@@ -60,7 +60,7 @@ suppress_fixture() {
   local entrypoint
   for entrypoint in unleash unleash-standalone.sh; do
     local script="$BATS_TEST_DIRNAME/../$entrypoint"
-    local target="$BATS_TEST_TMPDIR/$entrypoint" hosts
+    local target="$BATS_TEST_TMPDIR/$entrypoint" hosts backup
     hosts="$target/private/etc/hosts"
     mkdir -p "$(dirname "$hosts")"
     printf '127.0.0.1 localhost\n# Added by unleash — DEP enrollment block\n0.0.0.0 configuration.apple.com\n::      configuration.apple.com\n' > "$hosts"
@@ -68,11 +68,12 @@ suppress_fixture() {
     suppress_fixture "$script" "$target"
     run grep -q 'configuration[.]apple[.]com' "$hosts"
     [ "$status" -eq 1 ]
-    cmp "$target/original" "$hosts.unleash-rosetta.bak"
+    backup=$(find "$target/private/etc" -name '.unleash-hosts-backup.*' -type d | head -1)
+    cmp "$target/original" "$backup/before.0"
     cp "$hosts" "$target/repaired"
     suppress_fixture "$script" "$target"
     cmp "$target/repaired" "$hosts"
-    cmp "$target/original" "$hosts.unleash-rosetta.bak"
+    cmp "$target/original" "$backup/before.0"
   done
 }
 
@@ -80,7 +81,7 @@ suppress_fixture() {
   local entrypoint
   for entrypoint in unleash unleash-standalone.sh; do
     local script="$BATS_TEST_DIRNAME/../$entrypoint"
-    local target="$BATS_TEST_TMPDIR/$entrypoint" hosts
+    local target="$BATS_TEST_TMPDIR/$entrypoint" hosts backup
     hosts="$target/private/etc/hosts"
     mkdir -p "$(dirname "$hosts")"
     printf '0.0.0.0 configuration.apple.com\n:: configuration.apple.com manual.alias\n' > "$hosts"

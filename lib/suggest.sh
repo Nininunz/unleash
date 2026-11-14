@@ -27,13 +27,12 @@ cmd_suggest() {
     fi
   fi
 
-  local hosts="/etc/hosts"
-  if [ -f "$hosts" ] && grep -q "mdmenrollment.apple.com" "$hosts" 2>/dev/null; then
-    echo -e "${GRN}✓ MDM domains blocked${NC}"
+  if hosts_policy_matches ""; then
+    info "Owned hosts entries match saved policy (including individual overrides)."
   else
-    echo -e "${YEL}⚠ MDM domains not blocked${NC}"
+    warn "Owned hosts entries differ from saved policy."
     score=$((score + 5))
-    recommendations="$recommendations\n  - Run 'sudo ./unleash firewall' for pf-level block"
+    recommendations="$recommendations\n  - Run './unleash hosts preview' to inspect owned hosts changes"
   fi
 
   if command -v pfctl &>/dev/null; then
