@@ -45,7 +45,7 @@ This project follows a [Code of Conduct](CODE_OF_CONDUCT.md). By participating, 
 - **Additional MDM domains**: Research and add new Apple MDM endpoints
 - **Firewall improvements**: Better pf rules for selective blocking
 - **Documentation**: Translations, better troubleshooting guides
-- **CI/CD**: GitHub Actions for automated ShellCheck and syntax validation
+- **CI/CD**: Improve automated checks and macOS compatibility coverage
 
 ## Questions?
 
