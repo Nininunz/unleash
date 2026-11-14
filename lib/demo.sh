@@ -14,10 +14,10 @@ run_demo() {
 
   echo ""
   step "1. Simulating pre-bypass MDM state"
-  echo "     DEP record:      ${RED}PRESENT${NC}"
-  echo "     Hosts block:     ${RED}ABSENT${NC}"
-  echo "     Daemon override: ${RED}ABSENT${NC}"
-  echo "     User artifacts:  ${RED}PRESENT${NC}"
+  printf '%b\n' "     DEP record:      ${RED}PRESENT${NC}"
+  printf '%b\n' "     Hosts block:     ${RED}ABSENT${NC}"
+  printf '%b\n' "     Daemon override: ${RED}ABSENT${NC}"
+  printf '%b\n' "     User artifacts:  ${RED}PRESENT${NC}"
   sleep 1
 
   echo ""
@@ -30,28 +30,28 @@ run_demo() {
   step "3. Verifying post-bypass state"
   local clean=true
   if [ -f "$demo_dir/private/var/db/ConfigurationProfiles/Settings/.cloudConfigRecordFound" ]; then
-    echo "     DEP record:      ${RED}STILL PRESENT (bug)${NC}"
+    printf '%b\n' "     DEP record:      ${RED}STILL PRESENT (bug)${NC}"
     clean=false
   else
-    echo "     DEP record:      ${GRN}CLEARED${NC}"
+    printf '%b\n' "     DEP record:      ${GRN}CLEARED${NC}"
   fi
   if grep -q "iprofiles.apple.com" "$demo_dir/private/etc/hosts" 2>/dev/null; then
-    echo "     Hosts block:     ${GRN}ACTIVE${NC}"
+    printf '%b\n' "     Hosts block:     ${GRN}ACTIVE${NC}"
   else
-    echo "     Hosts block:     ${RED}ABSENT (bug)${NC}"
+    printf '%b\n' "     Hosts block:     ${RED}ABSENT (bug)${NC}"
     clean=false
   fi
   if [ -f "$demo_dir/Users/demo/Library/Preferences/com.apple.mdm.plist" ]; then
-    echo "     User artifacts:  ${RED}STILL PRESENT (bug)${NC}"
+    printf '%b\n' "     User artifacts:  ${RED}STILL PRESENT (bug)${NC}"
     clean=false
   else
-    echo "     User artifacts:  ${GRN}CLEANED${NC}"
+    printf '%b\n' "     User artifacts:  ${GRN}CLEANED${NC}"
   fi
 
   echo ""
   step "4. Simulating macOS update (re-enabling daemons)"
   rm -f "$demo_dir/private/var/db/com.apple.xpc.launchd/disabled.plist"
-  echo "     Daemon override: ${RED}RESET (simulating update)${NC}"
+  printf '%b\n' "     Daemon override: ${RED}RESET (simulating update)${NC}"
   sleep 1
 
   echo ""
@@ -60,25 +60,22 @@ run_demo() {
   sleep 1
 
   if [ -f "$demo_dir/private/var/db/com.apple.xpc.launchd/disabled.plist" ]; then
-    echo "     Daemon override: ${GRN}RESTORED${NC}"
+    printf '%b\n' "     Daemon override: ${GRN}RESTORED${NC}"
   fi
 
   echo ""
   step "6. Summary"
   if [ "$clean" = true ]; then
-    echo -e "   ${GRN}✓ Demo completed successfully${NC}"
+    printf '%b\n' "   ${GRN}✓ Demo completed successfully${NC}"
   else
-    echo -e "   ${YEL}⚠ Demo completed with warnings${NC}"
+    printf '%b\n' "   ${YEL}⚠ Demo completed with warnings${NC}"
   fi
   echo "   Simulated environment: $demo_dir"
   echo ""
   info "This is a simulated run. No real system was modified."
   info "Run 'rm -rf $demo_dir' to clean up."
 
-  echo ""
-  echo -e "${CYAN}╔═══════════════════════════════════════════════╗${NC}"
-  echo -e "${CYAN}║${NC}  ${GRN}Demo Complete${NC}                                         ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}  Commands used: suppress, heal                    ${CYAN}║${NC}"
-  echo -e "${CYAN}║${NC}  Try: ${YEL}sudo ./unleash doctor${NC}  for real diagnostics       ${CYAN}║${NC}"
-  echo -e "${CYAN}╚═══════════════════════════════════════════════╝${NC}"
+  header "Demo Complete"
+  printf '  %s\n' 'Commands used: suppress, heal'
+  printf '  Try: %b%s%b for real diagnostics\n' "$YEL" 'sudo ./unleash doctor' "$NC"
 }
